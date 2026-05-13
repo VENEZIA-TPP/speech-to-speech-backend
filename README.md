@@ -1,13 +1,24 @@
-# FastAPI Template
+# Speech-to-Speech Translation - Backend
 
-Backend template with FastAPI, PostgreSQL, SQLAlchemy (async) and Alembic.
+Real-time speech translation pipeline: **ASR -> MT** (-> TTS in Entrega 2).
+
+TPP - Ingeniería en Informática, FIUBA.  
+Authors: Victor Cipriano (106593) · Ricardo Contreras (107239)
+
+---
 
 ## Stack
 
-- FastAPI
-- PostgreSQL + SQLAlchemy async + Alembic
-- Docker + Docker Compose
-- pytest (SQLite in-memory)
+| Layer | Technology |
+|-------|-----------|
+| Web framework | FastAPI (async) + WebSocket |
+| Database | PostgreSQL 15 + SQLAlchemy 2 async + Alembic |
+| ASR | Whisper / faster-whisper *(stub for now)* |
+| MT | MarianMT / NLLB-200 *(stub for now)* |
+| Testing | pytest + pytest-asyncio + SQLite in-memory |
+| Container | Docker + Docker Compose |
+
+---
 
 ## Project structure
 
@@ -15,40 +26,87 @@ Backend template with FastAPI, PostgreSQL, SQLAlchemy (async) and Alembic.
 app/
 ├── main.py
 ├── core/
-│   ├── config.py          # env vars
-│   └── middleware.py      # CORS, logging
+│   ├── config.py                          # env vars + AI model settings
+│   └── middleware.py                      # CORS, request logging
 ├── db/
 │   ├── base.py
 │   └── session.py
-├── models/                # SQLAlchemy models
-├── schemas/               # Pydantic DTOs
+├── models/
+│   ├── translation_session.py             # session (source/target lang, status)
+│   ├── transcription.py                   # ASR output per chunk
+│   └── translation.py                     # MT output per chunk
+├── schemas/
+│   ├── translation_session.py
+│   ├── transcription.py
+│   └── translation.py                     # includes PipelineResult
 ├── repositories/
-│   ├── interfaces/        # Abstract interfaces
-│   └── user_repository.py # SQLAlchemy implementation
-├── services/              # Business logic
+│   ├── interfaces/                        # abstract interfaces (ABC)
+│   │   ├── translation_session_repository.py
+│   │   ├── transcription_repository.py
+│   │   └── translation_repository.py
+│   ├── translation_session_repository.py  # SQLAlchemy implementation
+│   ├── transcription_repository.py
+│   └── translation_repository.py
+├── services/
+│   ├── asr_service.py                     # Whisper stub -> replace with real model
+│   ├── mt_service.py                      # MarianMT/NLLB stub -> replace with real model
+│   ├── session_service.py                 # session CRUD + history queries
+│   └── translation_pipeline_service.py   # ASR -> MT orchestrator
 ├── api/
 │   ├── api.py
-│   └── endpoints/
-├── dependencies.py        # DI wiring
+│   └── controller/
+│       ├── health.py                      # GET /health
+│       ├── sessions.py                    # REST session management
+│       └── pipeline.py                    # WS  /pipeline/ws/{session_id}
+└── dependencies.py                        # DI wiring (FastAPI Depends)
 tests/
-├── conftest.py
-└── test_users.py
+├── conftest.py                            # SQLite in-memory fixtures
+├── test_sessions.py                       # session CRUD tests
+└── test_pipeline.py                       # stub service + pipeline integration tests
 ```
 
-## Quickstart
+---
+
+## API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Service info |
+| GET | `/health/` | Health + model status |
+| POST | `/sessions/` | Create translation session |
+| GET | `/sessions/{id}` | Get session |
+| PATCH | `/sessions/{id}/complete` | Mark session as completed |
+| DELETE | `/sessions/{id}` | Delete session |
+| GET | `/sessions/{id}/transcriptions` | ASR results for session |
+| GET | `/sessions/{id}/translations` | MT results for session |
+| WS | `/pipeline/ws/{session_id}` | Real-time audio streaming |
+
+Interactive docs: `http://localhost:8000/docs`
+
+---
+
+## WebSocket protocol
+
+```
+Client  ->  Server   binary frame   (WAV chunk, 16 kHz mono pcm_s16le)
+Server  ->  Client   JSON frame     PipelineResult
+Client  ->  Server   text "END"     signals end of stream
+Server  ->  Client   JSON           { "status": "completed", ... }
+```
+
+---
+
+## Quickstart (Docker)
 
 ```bash
 cp .env.example .env
 docker-compose up --build
 ```
 
-API available at `http://localhost:8000`.
-
-## Local development (without Docker)
+## Local development
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
@@ -56,31 +114,60 @@ uvicorn app.main:app --reload
 ## Migrations
 
 ```bash
-make migrate MSG="description"   # create migration
-make push                        # apply migrations
+make migrate MSG="description"   # generate migration
+make push                        # apply pending migrations
 make rollback                    # revert last migration
-make history                     # show history
 ```
 
 ## Tests
 
 ```bash
-pytest tests/ -v
+make test         # or: pytest tests/ -v
 ```
 
-Each test runs against its own isolated SQLite in-memory database.
+Each test uses an isolated SQLite in-memory database.
+
+---
+
+## Integrating a real ASR model
+
+1. Install: `pip install faster-whisper`
+2. In [app/services/asr_service.py](app/services/asr_service.py) replace `_transcribe()` with faster-whisper inference.
+3. Set `ASR_MODEL=whisper-base` (or larger) and `ASR_DEVICE=cuda` in `.env`.
+
+## Integrating a real MT model
+
+1. Install: `pip install transformers sentencepiece`
+2. In [app/services/mt_service.py](app/services/mt_service.py) replace `_translate()` with MarianMT or NLLB-200 inference.
+3. Set `MT_MODEL=Helsinki-NLP/opus-mt-en-es` in `.env`.
+
+---
 
 ## Environment variables
 
 ```bash
+# Database
 DATABASE_USER=postgres
 DATABASE_PASSWORD=postgres
-DATABASE_DB=postgres
+DATABASE_DB=s2st_db
 DATABASE_HOST=db
-DATABASE_PORT=5432
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/postgres
+DATABASE_PORT=5433
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/s2st_db
 
+# Server
 PORT=8000
 HOST=0.0.0.0
 PUBLIC_URL=http://localhost:8000
+
+# ASR
+ASR_MODEL=stub        # whisper-base | whisper-small | whisper-medium | whisper-large-v3
+ASR_DEVICE=cpu        # cuda for GPU
+
+# MT
+MT_MODEL=stub         # Helsinki-NLP/opus-mt-en-es | facebook/nllb-200-distilled-600M
+MT_DEVICE=cpu
+
+# Audio
+AUDIO_SAMPLE_RATE=16000
+AUDIO_CHUNK_DURATION_MS=3000
 ```
