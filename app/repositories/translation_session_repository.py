@@ -1,0 +1,47 @@
+from datetime import datetime, timezone
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.models.translation_session import TranslationSession, SessionStatus
+from app.schemas.translation_session import TranslationSessionCreate
+from app.repositories.interfaces.translation_session_repository import ITranslationSessionRepository
+
+
+class SQLAlchemyTranslationSessionRepository(ITranslationSessionRepository):
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def create(self, session_in: TranslationSessionCreate) -> TranslationSession:
+        session = TranslationSession(
+            source_language=session_in.source_language,
+            target_language=session_in.target_language,
+        )
+        self.db.add(session)
+        await self.db.commit()
+        await self.db.refresh(session)
+        return session
+
+    async def get_by_id(self, session_id: int) -> TranslationSession | None:
+        result = await self.db.execute(
+            select(TranslationSession).where(TranslationSession.id == session_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def update_status(self, session_id: int, status: SessionStatus) -> TranslationSession | None:
+        session = await self.get_by_id(session_id)
+        if session is None:
+            return None
+        session.status = status
+        session.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        await self.db.refresh(session)
+        return session
+
+    async def delete(self, session_id: int) -> bool:
+        session = await self.get_by_id(session_id)
+        if session is None:
+            return False
+        await self.db.delete(session)
+        await self.db.commit()
+        return True
