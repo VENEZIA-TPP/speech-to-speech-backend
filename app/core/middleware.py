@@ -8,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """middleware para registrar todas las peticiones http"""
 
     async def dispatch(self, request: Request, call_next):
         # log request

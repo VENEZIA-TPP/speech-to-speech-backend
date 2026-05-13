@@ -1,15 +1,26 @@
+# Web framework & server
 fastapi
 uvicorn[standard]
-SQLAlchemy>=1.4
+websockets
+python-multipart
+
+# Database
+SQLAlchemy>=2.0
 asyncpg
 psycopg2-binary
-python-dotenv
+alembic
+
+# Config & validation
 pydantic
 pydantic-settings
+pydantic[email]
+python-dotenv
+
+# Testing
 pytest
 pytest-asyncio
 httpx
-alembic
-pydantic[email]
 aiosqlite
+
+# Code quality
 black
