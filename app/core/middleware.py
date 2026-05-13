@@ -33,7 +33,7 @@ def setup_middlewares(app: FastAPI):
         CORSMiddleware,
         allow_origins=["*"],  # TODO: luego cambiar por la direccion
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],
     )
 
