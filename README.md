@@ -1,6 +1,6 @@
 # Speech-to-Speech Translation - Backend
 
-Real-time speech translation pipeline: **ASR -> MT** (-> TTS in Entrega 2).
+Real-time speech translation pipeline: **ASR -> MT -> TTS** (all stages stubbed).
 
 TPP - Ingeniería en Informática, FIUBA.  
 Authors: Victor Cipriano (106593) · Ricardo Contreras (107239)
@@ -15,6 +15,7 @@ Authors: Victor Cipriano (106593) · Ricardo Contreras (107239)
 | Database | PostgreSQL 15 + SQLAlchemy 2 async + Alembic |
 | ASR | Whisper / faster-whisper *(stub for now)* |
 | MT | MarianMT / NLLB-200 *(stub for now)* |
+| TTS | XTTS v2 / OpenVoice V2 / Chatterbox *(stub for now)* |
 | Testing | pytest + pytest-asyncio + SQLite in-memory |
 | Container | Docker + Docker Compose |
 
@@ -51,7 +52,8 @@ app/
 │   ├── asr_service.py                     # Whisper stub -> replace with real model
 │   ├── mt_service.py                      # MarianMT/NLLB stub -> replace with real model
 │   ├── session_service.py                 # session CRUD + history queries
-│   └── translation_pipeline_service.py   # ASR -> MT orchestrator
+│   ├── translation_pipeline_service.py   # ASR -> MT -> TTS orchestrator
+│   └── tts_service.py                     # TTS stub -> replace with real model
 ├── api/
 │   ├── api.py
 │   └── controller/
@@ -62,7 +64,7 @@ app/
 tests/
 ├── conftest.py                            # SQLite in-memory fixtures
 ├── test_sessions.py                       # session CRUD tests
-└── test_pipeline.py                       # stub service + pipeline integration tests
+└── test_pipeline.py                       # stub services + pipeline + WS e2e tests
 ```
 
 ---
@@ -89,7 +91,8 @@ Interactive docs: `http://localhost:8000/docs`
 
 ```
 Client  ->  Server   binary frame   (WAV chunk, 16 kHz mono pcm_s16le)
-Server  ->  Client   JSON frame     PipelineResult
+Server  ->  Client   JSON frame     PipelineResult (texts, metrics, watermark info)
+Server  ->  Client   binary frame   synthesized WAV (iff synthesized_audio_size_bytes > 0)
 Client  ->  Server   text "END"     signals end of stream
 Server  ->  Client   JSON           { "status": "completed", ... }
 ```
@@ -141,6 +144,12 @@ Each test uses an isolated SQLite in-memory database.
 2. In [app/services/mt_service.py](app/services/mt_service.py) replace `_translate()` with MarianMT or NLLB-200 inference.
 3. Set `MT_MODEL=Helsinki-NLP/opus-mt-en-es` in `.env`.
 
+## Integrating a real TTS model
+
+1. Model TBD (XTTS v2 / OpenVoice V2 / Chatterbox candidates).
+2. In [app/services/tts_service.py](app/services/tts_service.py) replace `_synthesize()` with real inference; keep the `_apply_watermark()` hook in the output path (ethical requirement).
+3. Set `TTS_MODEL=...` and `TTS_DEVICE=cuda` in `.env`.
+
 ---
 
 ## Environment variables
@@ -166,6 +175,10 @@ ASR_DEVICE=cpu        # cuda for GPU
 # MT
 MT_MODEL=stub         # Helsinki-NLP/opus-mt-en-es | facebook/nllb-200-distilled-600M
 MT_DEVICE=cpu
+
+# TTS
+TTS_MODEL=stub        # XTTS v2 | OpenVoice V2 | Chatterbox (model TBD)
+TTS_DEVICE=cpu
 
 # Audio
 AUDIO_SAMPLE_RATE=16000
