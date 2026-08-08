@@ -39,8 +39,6 @@ async def pipeline_websocket(
                         audio_bytes=data["bytes"],
                         chunk_index=chunk_index,
                     )
-                    chunk_index += 1
-                    await websocket.send_json(result.model_dump())
                 except ValueError as exc:
                     await websocket.send_json({"error": str(exc)})
                     break
@@ -48,6 +46,16 @@ async def pipeline_websocket(
                     await pipeline_service.fail_session(session_id)
                     await websocket.send_json({"error": f"Pipeline error: {exc}"})
                     break
+                # Send failures (client gone mid-frame-pair) must not mark the
+                # session FAILED - they fall through to the disconnect handling.
+                chunk_index += 1
+                await websocket.send_json(result.model_dump())
+                if result.synthesized_audio:
+                    await websocket.send_bytes(result.synthesized_audio)
+
+        # Loop exits via break (END or error): close explicitly so clients
+        # see a clean close frame instead of relying on server teardown.
+        await websocket.close()
 
     except WebSocketDisconnect:
         await pipeline_service.complete_session(session_id)
