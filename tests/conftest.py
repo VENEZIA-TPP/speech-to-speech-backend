@@ -1,8 +1,11 @@
+import asyncio
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 from httpx import AsyncClient, ASGITransport
+from fastapi.testclient import TestClient
 
 from app.main import app
 from app.db.base import Base
@@ -53,3 +56,21 @@ async def client(db_session):
         yield ac
 
     app.dependency_overrides.clear()
+
+
+async def _run_ddl(fn):
+    async with test_engine.begin() as conn:
+        await conn.run_sync(fn)
+
+
+@pytest.fixture(scope="function")
+def ws_client():
+    """Sync TestClient for WebSocket tests (httpx AsyncClient can't speak WS)."""
+    asyncio.run(_run_ddl(Base.metadata.create_all))
+    app.dependency_overrides[get_session] = override_get_session
+
+    with TestClient(app) as tc:
+        yield tc
+
+    app.dependency_overrides.clear()
+    asyncio.run(_run_ddl(Base.metadata.drop_all))

@@ -1,18 +1,19 @@
 """
-Pipeline tests - covers stub ASR/MT services and the full pipeline flow.
+Pipeline tests - covers stub ASR/MT/TTS services and the full pipeline flow.
 
 When real models are integrated:
   - Replace stub assertions with actual expected outputs.
   - Add latency threshold assertions (e.g. total_processing_time_ms < 5000).
   - Add BLEU score evaluation against a reference translation corpus.
 """
-import pytest
+import io
+import wave
+
 from httpx import AsyncClient
 
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
-
-pytestmark = pytest.mark.asyncio
+from app.services.tts_service import TTSService
 
 
 # Unit tests - stub services
@@ -51,6 +52,27 @@ async def test_mt_stub_preserves_language_codes():
     assert result.target_language == "en"
 
 
+async def test_tts_stub_returns_result():
+    tts = TTSService()
+    result = await tts.synthesize("Hola mundo", "es")
+
+    assert result.audio_bytes
+    assert result.audio_bytes[:4] == b"RIFF"
+    with wave.open(io.BytesIO(result.audio_bytes)) as wav:
+        assert wav.getframerate() == result.sample_rate
+    assert result.duration_ms > 0
+    assert result.processing_time_ms >= 0
+
+
+async def test_tts_stub_output_is_watermark_tagged():
+    """Synthesized output must carry the watermark/tag."""
+    tts = TTSService()
+    result = await tts.synthesize("Hola mundo", "es")
+
+    assert result.watermarked is True
+    assert result.watermark_method
+
+
 # Integration tests - pipeline via HTTP + DB (stub services)
 async def test_health_endpoint(client: AsyncClient):
     response = await client.get("/health/")
@@ -59,6 +81,7 @@ async def test_health_endpoint(client: AsyncClient):
     assert data["status"] == "ok"
     assert "asr" in data["services"]
     assert "mt" in data["services"]
+    assert "tts" in data["services"]
 
 
 async def test_pipeline_processes_chunk(db_session):
@@ -80,6 +103,7 @@ async def test_pipeline_processes_chunk(db_session):
         translation_repo=translation_repo,
         asr_service=ASRService(),
         mt_service=MTService(),
+        tts_service=TTSService(),
     )
 
     result = await pipeline.process_audio_chunk(
@@ -94,6 +118,11 @@ async def test_pipeline_processes_chunk(db_session):
     assert result.source_language == "en"
     assert result.target_language == "es"
     assert result.total_processing_time_ms is not None and result.total_processing_time_ms >= 0
+    assert result.tts_processing_time_ms is not None and result.tts_processing_time_ms >= 0
+    assert result.watermarked is True
+    assert result.watermark_method
+    assert result.synthesized_audio[:4] == b"RIFF"
+    assert result.synthesized_audio_size_bytes == len(result.synthesized_audio)
 
     transcriptions = await transcription_repo.get_by_session(session.id)
     assert len(transcriptions) == 1
@@ -101,3 +130,69 @@ async def test_pipeline_processes_chunk(db_session):
 
     translations = await translation_repo.get_by_session(session.id)
     assert len(translations) == 1
+
+
+# E2E - WebSocket protocol (full stub pipeline)
+def test_ws_pipeline_full_stub_flow(ws_client):
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+
+    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+
+        msg = ws.receive_json()
+        assert msg["chunk_index"] == 0
+        assert msg["original_text"]
+        assert msg["translated_text"]
+        assert msg["asr_processing_time_ms"] >= 0
+        assert msg["mt_processing_time_ms"] >= 0
+        assert msg["tts_processing_time_ms"] >= 0
+        assert msg["watermarked"] is True
+        assert msg["synthesized_audio_size_bytes"] > 0
+        assert "synthesized_audio" not in msg
+
+        audio = ws.receive_bytes()
+        assert len(audio) == msg["synthesized_audio_size_bytes"]
+        assert audio[:4] == b"RIFF"
+
+        ws.send_text("END")
+        done = ws.receive_json()
+        assert done["status"] == "completed"
+        assert done["total_chunks"] == 1
+
+
+def test_ws_unknown_session_returns_error(ws_client):
+    with ws_client.websocket_connect("/pipeline/ws/99999") as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        msg = ws.receive_json()
+        assert "error" in msg
+        # error paths never emit a trailing binary frame
+        assert ws.receive()["type"] == "websocket.close"
+
+
+def test_ws_pipeline_error_marks_session_failed(ws_client):
+    """Mid-pipeline failure: one JSON error frame, no binary frame, session FAILED."""
+    from app.dependencies import get_tts_service
+    from app.main import app
+
+    class BrokenTTSService(TTSService):
+        async def _synthesize(self, text, language, speaker_reference):
+            raise RuntimeError("boom")
+
+    app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService()
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+
+    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        msg = ws.receive_json()
+        assert "Pipeline error" in msg["error"]
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
