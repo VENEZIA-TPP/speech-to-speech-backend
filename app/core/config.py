@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     MT_MODEL: str = "stub"
     MT_DEVICE: str = "cpu"
 
+    # TTS
+    TTS_MODEL: str = "stub"
+    TTS_DEVICE: str = "cpu"
+
     # Audio processing
     AUDIO_SAMPLE_RATE: int = 16000           
     AUDIO_CHUNK_DURATION_MS: int = 3000

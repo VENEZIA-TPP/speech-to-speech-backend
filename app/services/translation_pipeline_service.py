@@ -1,5 +1,5 @@
 """
-Translation Pipeline Service - orchestrates the full ASR -> MT pipeline.
+Translation Pipeline Service - orchestrates the full ASR -> MT -> TTS pipeline.
 
 Flow per audio chunk:
   1. Look up the active TranslationSession.
@@ -7,9 +7,9 @@ Flow per audio chunk:
   3. Persist Transcription to DB.
   4. Run MTService.translate() -> get translated text + latency.
   5. Persist Translation to DB.
-  6. Return PipelineResult with all metrics.
-
-Future extension point: insert TTS step after MT (Entrega 2).
+  6. Run TTSService.synthesize() -> synthesized audio + watermark tag + latency
+     (TTS output is not persisted this delivery).
+  7. Return PipelineResult with all metrics + synthesized audio.
 """
 import time
 
@@ -20,6 +20,7 @@ from app.repositories.interfaces.translation_repository import ITranslationRepos
 from app.schemas.translation import PipelineResult
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
+from app.services.tts_service import TTSService
 
 
 class TranslationPipelineService:
@@ -30,12 +31,14 @@ class TranslationPipelineService:
         translation_repo: ITranslationRepository,
         asr_service: ASRService,
         mt_service: MTService,
+        tts_service: TTSService,
     ):
         self.session_repo = session_repo
         self.transcription_repo = transcription_repo
         self.translation_repo = translation_repo
         self.asr_service = asr_service
         self.mt_service = mt_service
+        self.tts_service = tts_service
 
     async def process_audio_chunk(
         self,
@@ -79,6 +82,13 @@ class TranslationPipelineService:
             mt_processing_time_ms=mt_result.processing_time_ms,
         )
 
+        # TTS (output not persisted this delivery)
+        tts_result = await self.tts_service.synthesize(
+            text=mt_result.translated_text,
+            language=mt_result.target_language,
+            speaker_reference=audio_bytes,  # source speaker sample for voice cloning
+        )
+
         total_ms = int((time.monotonic() - start_total) * 1000)
 
         return PipelineResult(
@@ -90,7 +100,12 @@ class TranslationPipelineService:
             target_language=mt_result.target_language,
             asr_processing_time_ms=asr_result.processing_time_ms,
             mt_processing_time_ms=mt_result.processing_time_ms,
+            tts_processing_time_ms=tts_result.processing_time_ms,
             total_processing_time_ms=total_ms,
+            synthesized_audio_size_bytes=len(tts_result.audio_bytes),
+            watermarked=tts_result.watermarked,
+            watermark_method=tts_result.watermark_method,
+            synthesized_audio=tts_result.audio_bytes,
         )
 
     async def complete_session(self, session_id: int) -> None:

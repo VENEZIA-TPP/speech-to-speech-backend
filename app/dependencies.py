@@ -13,6 +13,7 @@ from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
 from app.services.session_service import SessionService
 from app.services.translation_pipeline_service import TranslationPipelineService
+from app.services.tts_service import TTSService
 
 
 # Repositories
@@ -32,6 +33,7 @@ def get_translation_repository(db: AsyncSession = Depends(get_session)) -> ITran
 # AI services - singletons (loaded once at startup)
 _asr_service: ASRService | None = None
 _mt_service: MTService | None = None
+_tts_service: TTSService | None = None
 
 
 def get_asr_service() -> ASRService:
@@ -47,6 +49,14 @@ def get_mt_service() -> MTService:
         _mt_service = MTService(model_name=settings.MT_MODEL, device=settings.MT_DEVICE)
     return _mt_service
 
+
+def get_tts_service() -> TTSService:
+    global _tts_service
+    if _tts_service is None:
+        _tts_service = TTSService(
+            model_name=settings.TTS_MODEL, device=settings.TTS_DEVICE
+        )
+    return _tts_service
 
 
 # Application services
@@ -64,6 +74,7 @@ def get_pipeline_service(
     translation_repo: ITranslationRepository = Depends(get_translation_repository),
     asr_service: ASRService = Depends(get_asr_service),
     mt_service: MTService = Depends(get_mt_service),
+    tts_service: TTSService = Depends(get_tts_service),
 ) -> TranslationPipelineService:
     return TranslationPipelineService(
         session_repo=session_repo,
@@ -71,4 +82,5 @@ def get_pipeline_service(
         translation_repo=translation_repo,
         asr_service=asr_service,
         mt_service=mt_service,
+        tts_service=tts_service,
     )
