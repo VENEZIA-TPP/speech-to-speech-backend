@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PUBLIC_URL: str = "http://localhost:8000"
 
-    # ASR 
+    # ASR
     ASR_MODEL: str = "stub"
     ASR_DEVICE: str = "cpu"
 
@@ -30,8 +30,15 @@ class Settings(BaseSettings):
     TTS_DEVICE: str = "cpu"
 
     # Audio processing
-    AUDIO_SAMPLE_RATE: int = 16000           
+    AUDIO_SAMPLE_RATE: int = 16000
     AUDIO_CHUNK_DURATION_MS: int = 3000
+
+    # WebSocket
+    # Cap on a single binary frame. 2 MB ~= 60 s of 16 kHz mono pcm_s16le, well
+    # above AUDIO_CHUNK_DURATION_MS. Honest scope: by the time this is checked,
+    # Starlette already buffered the frame. The real pre-buffer cap is uvicorn's
+    # --ws-max-size; this check is what produces a clean 1009 close and a test.
+    MAX_AUDIO_FRAME_BYTES: int = 2_000_000
 
     @property
     def database_url(self) -> str:

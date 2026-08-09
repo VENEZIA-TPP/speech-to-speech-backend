@@ -152,7 +152,11 @@ def test_ws_pipeline_full_stub_flow(ws_client):
     assert created.status_code == 201
     session_id = created.json()["id"]
 
-    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", headers=headers
+    ) as ws:
         ws.send_bytes(b"fake_audio_chunk")
 
         msg = ws.receive_json()
@@ -176,13 +180,17 @@ def test_ws_pipeline_full_stub_flow(ws_client):
         assert done["total_chunks"] == 1
 
 
-def test_ws_unknown_session_returns_error(ws_client):
-    with ws_client.websocket_connect("/pipeline/ws/99999") as ws:
-        ws.send_bytes(b"fake_audio_chunk")
-        msg = ws.receive_json()
-        assert "error" in msg
-        # error paths never emit a trailing binary frame
-        assert ws.receive()["type"] == "websocket.close"
+def test_ws_unknown_session_is_rejected(ws_client):
+    """Una sesión inexistente se rechaza en la autorización, antes del pipeline.
+
+    Manda un frame primero: si el chequeo de auth se regresiona, el servidor
+    responde con algo (en vez de bloquear en receive()) y el test falla limpio
+    en vez de colgarse - no hay pytest-timeout configurado.
+    """
+    headers = {"Authorization": "Bearer whatever"}
+    with ws_client.websocket_connect("/pipeline/ws/99999", headers=headers) as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
 
 
 def test_ws_pipeline_error_marks_session_failed(ws_client):
@@ -200,8 +208,12 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     )
     session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
 
-    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", headers=headers
+    ) as ws:
         ws.send_bytes(b"fake_audio_chunk")
         msg = ws.receive_json()
         assert "Pipeline error" in msg["error"]
@@ -217,8 +229,12 @@ def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):
     )
     assert created.status_code == 201
     session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
 
-    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", headers=headers
+    ) as ws:
         ws.send_bytes(b"fake_audio_chunk")
         ws.receive_json()
         ws.receive_bytes()
@@ -249,11 +265,99 @@ def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     )
     session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
 
-    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", headers=headers
+    ) as ws:
         ws.send_bytes(b"fake_audio_chunk")
         assert "Pipeline error" in ws.receive_json()["error"]
         # A diferencia de test_ws_pipeline_error_marks_session_failed, NO se lee
         # el frame de cierre: se sale del bloque directamente.
 
     assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
+
+
+def test_ws_rejects_missing_token(ws_client):
+    """Manda un frame primero: si el chequeo de auth se regresiona, el servidor
+    responde (en vez de bloquear en receive()) y el test falla limpio en vez de
+    colgarse - no hay pytest-timeout configurado."""
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+
+    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
+
+
+def test_ws_rejects_foreign_session_token(ws_client):
+    """El token de la sesión A no abre la sesión B."""
+    a = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+    b = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    headers = {"Authorization": f"Bearer {a['ws_token']}"}
+    with ws_client.websocket_connect(f"/pipeline/ws/{b['id']}", headers=headers) as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
+
+    assert ws_client.get(f"/sessions/{b['id']}").json()["status"] == "active"
+
+
+def test_ws_rejects_non_ascii_token(ws_client):
+    """secrets.compare_digest lanza TypeError con str no-ASCII; encode() lo evita.
+
+    Sin el .encode(), esto explota en un 500/crash para una sesión existente en
+    vez del mismo 4401 limpio que un token cualquiera equivocado - reabriendo el
+    oráculo de enumeración que esta task existe para cerrar.
+    """
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    # HTTP header values are transmitted as raw bytes (ASGI decodes them as
+    # latin-1) - httpx's str path rejects non-ASCII outright, so send the
+    # header value pre-encoded to reach the server at all.
+    headers = {"Authorization": "Bearer ñ".encode("utf-8")}
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", headers=headers
+    ) as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
+
+
+def test_ws_accepts_own_token(ws_client):
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    headers = {"Authorization": f"Bearer {created['ws_token']}"}
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", headers=headers
+    ) as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        assert ws.receive_json()["chunk_index"] == 0
+        ws.receive_bytes()
+        ws.send_text("END")
+        assert ws.receive_json()["status"] == "completed"
+
+
+def test_ws_rejects_oversized_frame(ws_client):
+    from app.core.config import settings
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    headers = {"Authorization": f"Bearer {created['ws_token']}"}
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", headers=headers
+    ) as ws:
+        ws.send_bytes(b"\x00" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
+        assert ws.receive()["code"] == 1009  # RFC 6455: message too big

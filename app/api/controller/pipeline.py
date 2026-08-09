@@ -2,6 +2,7 @@ import contextlib
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 
+from app.core.config import settings
 from app.dependencies import get_pipeline_service
 from app.services.translation_pipeline_service import TranslationPipelineService
 
@@ -14,7 +15,17 @@ async def pipeline_websocket(
     session_id: int,
     pipeline_service: TranslationPipelineService = Depends(get_pipeline_service),
 ):
+    # accept() before close() is required to deliver a custom close code: an
+    # ASGI reject without accept surfaces to the client as HTTP 403, not 4401.
     await websocket.accept()
+    # Query-string tokens land in uvicorn's access log and any proxy log on
+    # every successful connection, not just rejections. A header does not.
+    auth_header = websocket.headers.get("authorization", "")
+    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else None
+    if not await pipeline_service.authorize(session_id, token):
+        await websocket.close(code=4401)
+        return
+
     chunk_index = 0
     # True once this handler has decided the session's terminal status, so the
     # cleanup below cannot overwrite a FAILED session with COMPLETED.
@@ -47,6 +58,9 @@ async def pipeline_websocket(
 
             # Audio chunk (binary)
             if "bytes" in data:
+                if len(data["bytes"]) > settings.MAX_AUDIO_FRAME_BYTES:
+                    await websocket.close(code=1009)  # RFC 6455: message too big
+                    break
                 try:
                     result = await pipeline_service.process_audio_chunk(
                         session_id=session_id,
