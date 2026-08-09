@@ -89,7 +89,8 @@ async def pipeline_websocket(
         # ABANDONED status - that would cost an enum migration for a distinction
         # nothing reads yet. Add it when a report needs to tell them apart.
         if not status_decided:
-            await pipeline_service.complete_session(session_id)
+            with contextlib.suppress(Exception):
+                await pipeline_service.complete_session(session_id)
         # A failed close is never actionable: the socket is going away either way.
         with contextlib.suppress(Exception):
             await websocket.close()

@@ -5,7 +5,9 @@ from sqlalchemy import select
 
 from app.models.translation_session import TranslationSession, SessionStatus
 from app.schemas.translation_session import TranslationSessionCreate
-from app.repositories.interfaces.translation_session_repository import ITranslationSessionRepository
+from app.repositories.interfaces.translation_session_repository import (
+    ITranslationSessionRepository,
+)
 
 
 class SQLAlchemyTranslationSessionRepository(ITranslationSessionRepository):
@@ -28,7 +30,14 @@ class SQLAlchemyTranslationSessionRepository(ITranslationSessionRepository):
         )
         return result.scalar_one_or_none()
 
-    async def update_status(self, session_id: int, status: SessionStatus) -> TranslationSession | None:
+    async def update_status(
+        self, session_id: int, status: SessionStatus
+    ) -> TranslationSession | None:
+        # The shared AsyncSession may already be poisoned by a failed write
+        # elsewhere in this request (e.g. a UniqueConstraint violation) - every
+        # call on it raises PendingRollbackError until it's rolled back. This
+        # is a no-op when the session isn't in that state, so always run it.
+        await self.db.rollback()
         session = await self.get_by_id(session_id)
         if session is None:
             return None

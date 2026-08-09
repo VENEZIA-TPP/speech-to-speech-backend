@@ -364,6 +364,77 @@ def test_ws_rejects_oversized_frame(ws_client):
         assert ws.receive()["code"] == 1009  # RFC 6455: message too big
 
 
+def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck():
+    """A UniqueConstraint violation mid-chunk (e.g. a client reconnecting and
+    resending chunk_index=0) must not poison the shared AsyncSession into
+    PendingRollbackError for the rest of the request. Without the fix,
+    fail_session()/complete_session() both reuse that poisoned session and
+    raise in turn, so the handler never decides a terminal status and the
+    session is stuck at whatever it was (the exact bug this branch's first
+    commit fixed, reopened via a different trigger).
+
+    Seeds the colliding chunk_index=0 row directly via the repositories,
+    before the TestClient/WS portal exists, rather than via the ws_client
+    fixture + a second real WS connection: StaticPool's single aiosqlite
+    connection does not survive a websocket_connect() context's teardown
+    cancelling an in-flight statement on it, so driving this through two
+    sequential real WS connections is flaky at the test-harness level and
+    unrelated to the bug under test.
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from app.db.base import Base
+    from app.db.session import get_session
+    from app.main import app
+    from app.repositories.transcription_repository import (
+        SQLAlchemyTranscriptionRepository,
+    )
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.schemas.translation_session import TranslationSessionCreate
+    from tests.conftest import TestSessionLocal, _run_ddl, override_get_session
+
+    async def setup():
+        await _run_ddl(Base.metadata.create_all)
+        async with TestSessionLocal() as session:
+            session_repo = SQLAlchemyTranslationSessionRepository(session)
+            created = await session_repo.create(
+                TranslationSessionCreate(source_language="en", target_language="es")
+            )
+            transcription_repo = SQLAlchemyTranscriptionRepository(session)
+            await transcription_repo.create(
+                session_id=created.id,
+                chunk_index=0,
+                original_text="existing",
+                detected_language="en",
+                confidence=None,
+                asr_processing_time_ms=1,
+            )
+            return created.id, created.ws_token
+
+    session_id, token = asyncio.run(setup())
+
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        with TestClient(app) as tc:
+            headers = {"Authorization": f"Bearer {token}"}
+            with tc.websocket_connect(
+                f"/pipeline/ws/{session_id}", headers=headers
+            ) as ws:
+                ws.send_bytes(b"fake_audio_chunk")
+                msg = ws.receive_json()
+                assert "error" in msg
+                assert ws.receive()["type"] == "websocket.close"
+
+            assert tc.get(f"/sessions/{session_id}").json()["status"] == "failed"
+    finally:
+        app.dependency_overrides.clear()
+        asyncio.run(_run_ddl(Base.metadata.drop_all))
+
+
 async def test_duplicate_chunk_index_rejected(db_session):
     from sqlalchemy.exc import IntegrityError
 
