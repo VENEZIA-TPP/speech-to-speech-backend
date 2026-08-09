@@ -29,7 +29,6 @@ class SQLAlchemyTranslationRepository(ITranslationRepository):
         )
         self.db.add(translation)
         await self.db.commit()
-        await self.db.refresh(translation)
         return translation
 
     async def get_by_session(self, session_id: int) -> List[Translation]:
