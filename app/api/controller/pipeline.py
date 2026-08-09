@@ -15,16 +15,33 @@ async def pipeline_websocket(
     session_id: int,
     pipeline_service: TranslationPipelineService = Depends(get_pipeline_service),
 ):
-    # accept() before close() is required to deliver a custom close code: an
-    # ASGI reject without accept surfaces to the client as HTTP 403, not 4401.
-    await websocket.accept()
-    # Query-string tokens land in uvicorn's access log and any proxy log on
-    # every successful connection, not just rejections. A header does not.
-    auth_header = websocket.headers.get("authorization", "")
-    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else None
+    # Sec-WebSocket-Protocol, not a header or query string: it's settable from
+    # a browser's native WebSocket API (new WebSocket(url, [token])), and like
+    # a header it never lands in uvicorn's default access log (only the path +
+    # query string do).
+    subprotocols = websocket.scope.get("subprotocols", [])
+    token = subprotocols[0] if subprotocols else None
+    # Echoed into a response header below; gate to the token charset first so
+    # unvalidated client bytes never reach the header encoder (worst case
+    # without this is an ugly 500 from h11, not header injection, but it's
+    # cheap insurance).
+    is_plausible_token = (
+        token is not None and token.replace("-", "").replace("_", "").isalnum()
+    )
+    echo_subprotocol = token if is_plausible_token else None
     if not await pipeline_service.authorize(session_id, token):
+        # accept() before close() is required to deliver a custom close code:
+        # an ASGI reject without accept surfaces to the client as HTTP 403,
+        # not 4401. It must also echo back the subprotocol the client
+        # offered: a real browser that offers a subprotocol and gets none
+        # back in the handshake response treats that as a handshake
+        # *failure* (onclose fires with 1006, our 4401 never arrives), not a
+        # clean open-then-close - silently defeating this task's whole point.
+        await websocket.accept(subprotocol=echo_subprotocol)
         await websocket.close(code=4401)
         return
+
+    await websocket.accept(subprotocol=echo_subprotocol)
 
     chunk_index = 0
     # True once this handler has decided the session's terminal status, so the

@@ -53,9 +53,8 @@ def create_session() -> tuple[int, str]:
 
 async def stream(session_id: int, token: str, audio: bytes) -> None:
     ws_url = f"{BASE_URL.replace('http', 'ws', 1)}/pipeline/ws/{session_id}"
-    headers = {"Authorization": f"Bearer {token}"}
 
-    async with websockets.connect(ws_url, additional_headers=headers) as ws:
+    async with websockets.connect(ws_url, subprotocols=[token]) as ws:
         for i in range(CHUNKS):
             await ws.send(audio)
 
