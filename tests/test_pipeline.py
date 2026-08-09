@@ -10,6 +10,7 @@ When real models are integrated:
 import io
 import wave
 
+import pytest
 from httpx import AsyncClient
 
 from app.services.asr_service import ASRService
@@ -361,3 +362,46 @@ def test_ws_rejects_oversized_frame(ws_client):
     ) as ws:
         ws.send_bytes(b"\x00" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
         assert ws.receive()["code"] == 1009  # RFC 6455: message too big
+
+
+async def test_duplicate_chunk_index_rejected(db_session):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.repositories.transcription_repository import (
+        SQLAlchemyTranscriptionRepository,
+    )
+    from app.schemas.translation_session import TranslationSessionCreate
+
+    session_repo = SQLAlchemyTranslationSessionRepository(db_session)
+    transcription_repo = SQLAlchemyTranscriptionRepository(db_session)
+
+    session = await session_repo.create(
+        TranslationSessionCreate(source_language="en", target_language="es")
+    )
+
+    await transcription_repo.create(
+        session_id=session.id,
+        chunk_index=0,
+        original_text="first",
+        detected_language="en",
+        confidence=None,
+        asr_processing_time_ms=1,
+    )
+
+    with pytest.raises(IntegrityError):
+        await transcription_repo.create(
+            session_id=session.id,
+            chunk_index=0,
+            original_text="duplicate",
+            detected_language="en",
+            confidence=None,
+            asr_processing_time_ms=1,
+        )
+
+    # The failed INSERT leaves the transaction poisoned; without this rollback
+    # the fixture's drop_all fails and the error surfaces as a teardown cascade
+    # in unrelated tests.
+    await db_session.rollback()
