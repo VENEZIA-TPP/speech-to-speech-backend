@@ -71,17 +71,21 @@ tests/
 
 ## API endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Service info |
-| GET | `/health/` | Health + model status |
-| POST | `/sessions/` | Create translation session |
-| GET | `/sessions/{id}` | Get session |
-| PATCH | `/sessions/{id}/complete` | Mark session as completed |
-| DELETE | `/sessions/{id}` | Delete session |
-| GET | `/sessions/{id}/transcriptions` | ASR results for session |
-| GET | `/sessions/{id}/translations` | MT results for session |
-| WS | `/pipeline/ws/{session_id}` | Real-time audio streaming |
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/` | Service info | none |
+| GET | `/health/` | Health + model status | none |
+| POST | `/sessions/` | Create translation session | none (mints the `ws_token`) |
+| GET | `/sessions/{id}` | Get session | `Authorization: Bearer <ws_token>` |
+| PATCH | `/sessions/{id}/complete` | Mark session as completed | `Authorization: Bearer <ws_token>` |
+| DELETE | `/sessions/{id}` | Delete session | `Authorization: Bearer <ws_token>` |
+| GET | `/sessions/{id}/transcriptions` | ASR results for session | `Authorization: Bearer <ws_token>` |
+| GET | `/sessions/{id}/translations` | MT results for session | `Authorization: Bearer <ws_token>` |
+| WS | `/pipeline/ws/{session_id}` | Real-time audio streaming | `Sec-WebSocket-Protocol: <ws_token>` |
+
+`ws_token` is returned once, in the `POST /sessions/` response body — every other
+`/sessions/{id}...` route 401s without it (unknown or already-deleted session ids also
+401, never 404, to avoid leaking which ids exist).
 
 Interactive docs: `http://localhost:8000/docs`
 
@@ -90,6 +94,7 @@ Interactive docs: `http://localhost:8000/docs`
 ## WebSocket protocol
 
 ```
+Client  ->  Server   Sec-WebSocket-Protocol: <ws_token>   (handshake; from POST /sessions/ response)
 Client  ->  Server   binary frame   (WAV chunk, 16 kHz mono pcm_s16le)
 Server  ->  Client   JSON frame     PipelineResult (texts, metrics, watermark info)
 Server  ->  Client   binary frame   synthesized WAV (iff synthesized_audio_size_bytes > 0)

@@ -94,7 +94,11 @@ async def require_session_token(
         else None
     )
     if not await service.authorize(session_id, token):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def get_pipeline_service(

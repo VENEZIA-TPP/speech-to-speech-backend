@@ -24,9 +24,13 @@ async def pipeline_websocket(
     # Echoed into a response header below; gate to the token charset first so
     # unvalidated client bytes never reach the header encoder (worst case
     # without this is an ugly 500 from h11, not header injection, but it's
-    # cheap insurance).
+    # cheap insurance). str.isalnum() alone is Unicode-aware (accepts 'ñ',
+    # '日本', '٣'), so isascii() is required too to actually restrict this to
+    # ASCII letters/digits plus '-'/'_'.
     is_plausible_token = (
-        token is not None and token.replace("-", "").replace("_", "").isalnum()
+        token is not None
+        and token.isascii()
+        and token.replace("-", "").replace("_", "").isalnum()
     )
     echo_subprotocol = token if is_plausible_token else None
     if not await pipeline_service.authorize(session_id, token):
@@ -88,7 +92,16 @@ async def pipeline_websocket(
                     await websocket.send_json({"error": str(exc)})
                     break
                 except Exception as exc:
-                    await pipeline_service.fail_session(session_id)
+                    # Mirrors the finally block's suppress on complete_session():
+                    # if fail_session()'s own write fails (its rollback trips, a
+                    # DB blip), that must not raise a second exception out of the
+                    # handler - that would skip the send_json below and, worse,
+                    # leave status_decided False, making the finally block try
+                    # (and very possibly also fail) to mark the session COMPLETED
+                    # instead - the same stuck-ACTIVE failure shape already fixed
+                    # twice (79d3547, d8cd711).
+                    with contextlib.suppress(Exception):
+                        await pipeline_service.fail_session(session_id)
                     status_decided = True
                     await websocket.send_json({"error": f"Pipeline error: {exc}"})
                     break

@@ -37,6 +37,10 @@ class SQLAlchemyTranslationSessionRepository(ITranslationSessionRepository):
         # elsewhere in this request (e.g. a UniqueConstraint violation) - every
         # call on it raises PendingRollbackError until it's rolled back. This
         # is a no-op when the session isn't in that state, so always run it.
+        # It also unconditionally discards any uncommitted work on the shared
+        # session - harmless today since every write in this codebase commits
+        # immediately, but worth knowing if a unit-of-work / deferred-commit
+        # pattern is ever introduced later.
         await self.db.rollback()
         session = await self.get_by_id(session_id)
         if session is None:
