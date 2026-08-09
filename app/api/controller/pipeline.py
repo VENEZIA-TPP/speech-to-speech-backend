@@ -1,3 +1,5 @@
+import contextlib
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 
 from app.dependencies import get_pipeline_service
@@ -14,20 +16,32 @@ async def pipeline_websocket(
 ):
     await websocket.accept()
     chunk_index = 0
+    # True once this handler has decided the session's terminal status, so the
+    # cleanup below cannot overwrite a FAILED session with COMPLETED.
+    status_decided = False
 
     try:
         while True:
             data = await websocket.receive()
 
+            # Raw receive() RETURNS the disconnect message instead of raising it;
+            # without this branch the next receive() blows up with RuntimeError,
+            # that escapes the handler, and the session stays ACTIVE forever.
+            if data["type"] == "websocket.disconnect":
+                break
+
             # Control message
             if "text" in data:
                 if data["text"] == "END":
                     await pipeline_service.complete_session(session_id)
-                    await websocket.send_json({
-                        "status": "completed",
-                        "session_id": session_id,
-                        "total_chunks": chunk_index,
-                    })
+                    status_decided = True
+                    await websocket.send_json(
+                        {
+                            "status": "completed",
+                            "session_id": session_id,
+                            "total_chunks": chunk_index,
+                        }
+                    )
                     break
                 continue  # ignore other text frames
 
@@ -44,6 +58,7 @@ async def pipeline_websocket(
                     break
                 except Exception as exc:
                     await pipeline_service.fail_session(session_id)
+                    status_decided = True
                     await websocket.send_json({"error": f"Pipeline error: {exc}"})
                     break
                 # Send failures (client gone mid-frame-pair) must not mark the
@@ -53,9 +68,14 @@ async def pipeline_websocket(
                 if result.synthesized_audio:
                     await websocket.send_bytes(result.synthesized_audio)
 
-        # Loop exits via break (END or error): close explicitly so clients
-        # see a clean close frame instead of relying on server teardown.
-        await websocket.close()
-
     except WebSocketDisconnect:
-        await pipeline_service.complete_session(session_id)
+        pass
+    finally:
+        # An abandoned session lands on COMPLETED rather than a new
+        # ABANDONED status - that would cost an enum migration for a distinction
+        # nothing reads yet. Add it when a report needs to tell them apart.
+        if not status_decided:
+            await pipeline_service.complete_session(session_id)
+        # A failed close is never actionable: the socket is going away either way.
+        with contextlib.suppress(Exception):
+            await websocket.close()

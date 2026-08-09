@@ -6,6 +6,7 @@ When real models are integrated:
   - Add latency threshold assertions (e.g. total_processing_time_ms < 5000).
   - Add BLEU score evaluation against a reference translation corpus.
 """
+
 import io
 import wave
 
@@ -86,8 +87,12 @@ async def test_health_endpoint(client: AsyncClient):
 
 async def test_pipeline_processes_chunk(db_session):
     from app.services.translation_pipeline_service import TranslationPipelineService
-    from app.repositories.translation_session_repository import SQLAlchemyTranslationSessionRepository
-    from app.repositories.transcription_repository import SQLAlchemyTranscriptionRepository
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.repositories.transcription_repository import (
+        SQLAlchemyTranscriptionRepository,
+    )
     from app.repositories.translation_repository import SQLAlchemyTranslationRepository
     from app.schemas.translation_session import TranslationSessionCreate
 
@@ -95,7 +100,9 @@ async def test_pipeline_processes_chunk(db_session):
     transcription_repo = SQLAlchemyTranscriptionRepository(db_session)
     translation_repo = SQLAlchemyTranslationRepository(db_session)
 
-    session = await session_repo.create(TranslationSessionCreate(source_language="en", target_language="es"))
+    session = await session_repo.create(
+        TranslationSessionCreate(source_language="en", target_language="es")
+    )
 
     pipeline = TranslationPipelineService(
         session_repo=session_repo,
@@ -117,8 +124,13 @@ async def test_pipeline_processes_chunk(db_session):
     assert result.translated_text
     assert result.source_language == "en"
     assert result.target_language == "es"
-    assert result.total_processing_time_ms is not None and result.total_processing_time_ms >= 0
-    assert result.tts_processing_time_ms is not None and result.tts_processing_time_ms >= 0
+    assert (
+        result.total_processing_time_ms is not None
+        and result.total_processing_time_ms >= 0
+    )
+    assert (
+        result.tts_processing_time_ms is not None and result.tts_processing_time_ms >= 0
+    )
     assert result.watermarked is True
     assert result.watermark_method
     assert result.synthesized_audio[:4] == b"RIFF"
@@ -194,5 +206,54 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
         msg = ws.receive_json()
         assert "Pipeline error" in msg["error"]
         assert ws.receive()["type"] == "websocket.close"
+
+    assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
+
+
+def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):
+    """Cerrar el socket sin mandar "END" no puede dejar la fila en ACTIVE."""
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+
+    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        ws.receive_json()
+        ws.receive_bytes()
+        # Close from the client side ourselves, then wait for the server's own
+        # close frame. This forces the test to observe the disconnect branch
+        # actually running server-side: letting the `with` block's own
+        # teardown do the closing races the handler's pending receive() against
+        # an unconditional cancel and passes whether or not that branch exists
+        # (verified via mutation - see test-1-report.md).
+        ws.close()
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert ws_client.get(f"/sessions/{session_id}").json()["status"] != "active"
+
+
+def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
+    """Un fallo del pipeline marca FAILED, y la desconexión no puede pisarlo con COMPLETED."""
+    from app.dependencies import get_tts_service
+    from app.main import app
+
+    class BrokenTTSService(TTSService):
+        async def _synthesize(self, text, language, speaker_reference):
+            raise RuntimeError("boom")
+
+    app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService()
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+
+    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        assert "Pipeline error" in ws.receive_json()["error"]
+        # A diferencia de test_ws_pipeline_error_marks_session_failed, NO se lee
+        # el frame de cierre: se sale del bloque directamente.
 
     assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
