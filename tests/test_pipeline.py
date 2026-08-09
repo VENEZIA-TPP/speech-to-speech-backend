@@ -7,6 +7,7 @@ When real models are integrated:
   - Add BLEU score evaluation against a reference translation corpus.
 """
 
+import hashlib
 import io
 import wave
 
@@ -59,11 +60,11 @@ async def test_tts_stub_returns_result():
     tts = TTSService("stub", "cpu")
     result = await tts.synthesize(TTSState(), "Hola mundo", "es")
 
-    assert result.audio_bytes
-    assert result.audio_bytes[:4] == b"RIFF"
-    with wave.open(io.BytesIO(result.audio_bytes)) as wav:
-        assert wav.getframerate() == result.sample_rate
-    assert result.duration_ms > 0
+    assert result.audio.data
+    assert result.audio.data[:4] == b"RIFF"
+    with wave.open(io.BytesIO(result.audio.data)) as wav:
+        assert wav.getframerate() == result.audio.sample_rate
+    assert result.audio.duration_ms > 0
     assert result.processing_time_ms >= 0
 
 
@@ -72,8 +73,8 @@ async def test_tts_stub_output_is_watermark_tagged():
     tts = TTSService("stub", "cpu")
     result = await tts.synthesize(TTSState(), "Hola mundo", "es")
 
-    assert result.watermarked is True
-    assert result.watermark_method
+    assert result.audio.method
+    assert result.audio.sha256 == hashlib.sha256(result.audio.data).hexdigest()
 
 
 # Integration tests - pipeline via HTTP + DB (stub services)
@@ -226,6 +227,61 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
         ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
         == "failed"
     )
+
+
+def test_raw_audio_never_reaches_socket(ws_client):
+    """A TTS whose watermark hook hands back the raw audio must fail closed.
+
+    Rule #6 used to depend on the order of two lines inside synthesize(). Now
+    it depends on the type: _synthesize() can only produce RawAudio, and the
+    pipeline only accepts WatermarkedAudio, so unmarked audio cannot reach the
+    socket even if the hook is overridden to do nothing. The client gets one
+    JSON error frame, NO binary frame, and the session lands FAILED.
+    """
+    from app.dependencies import get_tts_service
+    from app.main import app
+
+    class UnmarkedTTSService(TTSService):
+        def _apply_watermark(self, raw):
+            return raw  # RawAudio, not WatermarkedAudio
+
+    app.dependency_overrides[get_tts_service] = lambda: UnmarkedTTSService(
+        "stub", "cpu"
+    )
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+    session_id = created["id"]
+    token = created["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        msg = ws.receive_json()
+        assert "Pipeline error" in msg["error"]
+        assert "WatermarkedAudio" in msg["error"]
+        # The next frame is the close, never audio.
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
+
+
+async def test_tts_result_carries_a_watermarked_audio():
+    """TTSResult(watermarked=False) with audio inside used to be constructible."""
+    from app.pipeline.contracts import TTSState, WatermarkedAudio
+
+    tts = TTSService("stub", "cpu")
+    result = await tts.synthesize(TTSState(), "Hola mundo", "es")
+
+    assert isinstance(result.audio, WatermarkedAudio)
+    assert result.audio.method
+    assert result.audio.data[:4] == b"RIFF"
 
 
 def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):

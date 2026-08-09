@@ -105,6 +105,7 @@ class TranslationPipelineService:
             language=mt_result.target_language,
         )
 
+        audio = tts_result.audio
         total_ms = int((time.monotonic() - start_total) * 1000)
 
         return PipelineResult(
@@ -118,10 +119,12 @@ class TranslationPipelineService:
             mt_processing_time_ms=mt_result.processing_time_ms,
             tts_processing_time_ms=tts_result.processing_time_ms,
             total_processing_time_ms=total_ms,
-            synthesized_audio_size_bytes=len(tts_result.audio_bytes),
-            watermarked=tts_result.watermarked,
-            watermark_method=tts_result.watermark_method,
-            synthesized_audio=tts_result.audio_bytes,
+            synthesized_audio_size_bytes=len(audio.data),
+            # True by construction: WatermarkedAudio cannot exist with an empty
+            # method, and it is the only audio type that gets this far.
+            watermarked=True,
+            watermark_method=audio.method,
+            synthesized_audio=audio.data,
         )
 
     async def authorize(self, session_id: int, token: str | None) -> bool:

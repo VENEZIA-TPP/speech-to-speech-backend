@@ -2,9 +2,8 @@ import io
 import time
 import wave
 from dataclasses import dataclass
-from typing import Optional
 
-from app.pipeline.contracts import TTSState
+from app.pipeline.contracts import RawAudio, TTSState, WatermarkedAudio
 
 _STUB_SAMPLE_RATE = 16000
 _STUB_DURATION_MS = 300
@@ -12,11 +11,10 @@ _STUB_DURATION_MS = 300
 
 @dataclass
 class TTSResult:
-    audio_bytes: bytes
-    sample_rate: int
-    duration_ms: int
-    watermarked: bool
-    watermark_method: Optional[str]
+    # One field, not five: TTSResult(audio_bytes=..., watermarked=False,
+    # watermark_method=None) used to be constructible, and the system would
+    # have emitted it. The type now carries the guarantee.
+    audio: WatermarkedAudio
     processing_time_ms: int
 
 
@@ -40,28 +38,28 @@ class TTSService:
         # per session by the segmenter (PR 12). Passing the current audio chunk
         # as a speaker reference - the Fase 0 bug - is no longer expressible.
         start = time.monotonic()
-        audio_bytes, sample_rate, duration_ms = await self._synthesize(
-            state, text, language
-        )
-        # Watermark applied here so a real _synthesize() cannot skip it.
-        audio_bytes, watermarked, watermark_method = self._apply_watermark(audio_bytes)
+        raw = await self._synthesize(state, text, language)
+        # Rule #6, enforced by the type rather than by line order: _synthesize()
+        # can only produce RawAudio, and only this hook produces the
+        # WatermarkedAudio the pipeline accepts. The isinstance check is the one
+        # place all synthesized audio passes through, so an overridden hook that
+        # hands the raw audio back fails closed here instead of reaching a socket.
+        audio = self._apply_watermark(raw)
+        if not isinstance(audio, WatermarkedAudio):
+            raise TypeError(
+                f"{type(self).__name__}._apply_watermark() must return "
+                f"WatermarkedAudio, got {type(audio).__name__}"
+            )
         processing_time_ms = int((time.monotonic() - start) * 1000)
 
-        return TTSResult(
-            audio_bytes=audio_bytes,
-            sample_rate=sample_rate,
-            duration_ms=duration_ms,
-            watermarked=watermarked,
-            watermark_method=watermark_method,
-            processing_time_ms=processing_time_ms,
-        )
+        return TTSResult(audio=audio, processing_time_ms=processing_time_ms)
 
     async def _synthesize(
         self,
         state: TTSState,
         text: str,
         language: str,
-    ) -> tuple[bytes, int, int]:
+    ) -> RawAudio:
         # TODO: Internal synthesis - replace with real inference. Heavy
         # inference must run in an executor/worker, never inline on the event
         # loop. Clone from state.speaker when it is sealed; None means the
@@ -74,9 +72,19 @@ class TTSService:
             wav.setsampwidth(2)
             wav.setframerate(_STUB_SAMPLE_RATE)
             wav.writeframes(b"\x00\x00" * n_frames)
-        return buffer.getvalue(), _STUB_SAMPLE_RATE, _STUB_DURATION_MS
+        return RawAudio(
+            data=buffer.getvalue(),
+            sample_rate=_STUB_SAMPLE_RATE,
+            duration_ms=_STUB_DURATION_MS,
+        )
 
-    def _apply_watermark(self, audio_bytes: bytes) -> tuple[bytes, bool, Optional[str]]:
-        # Watermark/tagging hook. Stub tags metadata only;
-        # real audio-domain watermarking replaces this body.
-        return audio_bytes, True, "stub-metadata-tag"
+    def _apply_watermark(self, raw: RawAudio) -> WatermarkedAudio:
+        # Watermark/tagging hook. Stub tags metadata only; real audio-domain
+        # watermarking replaces this body and must still return
+        # WatermarkedAudio - it never bypasses the type.
+        return WatermarkedAudio(
+            data=raw.data,
+            sample_rate=raw.sample_rate,
+            duration_ms=raw.duration_ms,
+            method="stub-metadata-tag",
+        )
