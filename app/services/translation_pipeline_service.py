@@ -12,7 +12,6 @@ Flow per audio chunk:
   7. Return PipelineResult with all metrics + synthesized audio.
 """
 
-import secrets
 import time
 
 from app.models.translation_session import SessionStatus
@@ -26,6 +25,7 @@ from app.repositories.interfaces.translation_repository import ITranslationRepos
 from app.schemas.translation import PipelineResult
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
+from app.services.session_auth import authorize_session_token
 from app.services.tts_service import TTSService
 
 
@@ -118,15 +118,9 @@ class TranslationPipelineService:
         """Constant-time check that `token` is this session's ws_token.
 
         Lives in the service, not the controller: it is an authorization rule
-        and it needs the repository. Returns False for a missing session too,
-        so an attacker cannot distinguish "wrong token" from "no such session".
+        and it needs the repository.
         """
-        if not token:
-            return False
-        session = await self.session_repo.get_by_id(session_id)
-        if session is None:
-            return False
-        return secrets.compare_digest(session.ws_token.encode(), token.encode())
+        return await authorize_session_token(self.session_repo, session_id, token)
 
     async def complete_session(self, session_id: int) -> None:
         await self.session_repo.update_status(session_id, SessionStatus.COMPLETED)

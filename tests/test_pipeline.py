@@ -220,7 +220,10 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
         assert "Pipeline error" in msg["error"]
         assert ws.receive()["type"] == "websocket.close"
 
-    assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
 
 
 def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):
@@ -248,7 +251,10 @@ def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):
         ws.close()
         assert ws.receive()["type"] == "websocket.close"
 
-    assert ws_client.get(f"/sessions/{session_id}").json()["status"] != "active"
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        != "active"
+    )
 
 
 def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
@@ -277,7 +283,10 @@ def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
         # A diferencia de test_ws_pipeline_error_marks_session_failed, NO se lee
         # el frame de cierre: se sale del bloque directamente.
 
-    assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
 
 
 def test_ws_rejects_missing_token(ws_client):
@@ -308,7 +317,11 @@ def test_ws_rejects_foreign_session_token(ws_client):
         ws.send_bytes(b"x")
         assert ws.receive()["code"] == 4401
 
-    assert ws_client.get(f"/sessions/{b['id']}").json()["status"] == "active"
+    b_headers = {"Authorization": f"Bearer {b['ws_token']}"}
+    assert (
+        ws_client.get(f"/sessions/{b['id']}", headers=b_headers).json()["status"]
+        == "active"
+    )
 
 
 def test_ws_rejects_non_ascii_token(ws_client):
@@ -429,10 +442,41 @@ def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck():
                 assert "error" in msg
                 assert ws.receive()["type"] == "websocket.close"
 
-            assert tc.get(f"/sessions/{session_id}").json()["status"] == "failed"
+            assert (
+                tc.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+                == "failed"
+            )
     finally:
         app.dependency_overrides.clear()
         asyncio.run(_run_ddl(Base.metadata.drop_all))
+
+
+async def test_authorize_session_token_rejects_missing_and_wrong_and_none(db_session):
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.schemas.translation_session import TranslationSessionCreate
+    from app.services.session_auth import authorize_session_token
+
+    session_repo = SQLAlchemyTranslationSessionRepository(db_session)
+    session = await session_repo.create(
+        TranslationSessionCreate(source_language="en", target_language="es")
+    )
+
+    assert (
+        await authorize_session_token(session_repo, session.id, session.ws_token)
+        is True
+    )
+    assert (
+        await authorize_session_token(session_repo, session.id, "wrong-token") is False
+    )
+    assert await authorize_session_token(session_repo, session.id, None) is False
+    assert (
+        await authorize_session_token(session_repo, 999999, session.ws_token) is False
+    )
+    # Non-ASCII must not crash the constant-time compare (both operands are
+    # bytes via .encode(), which never raises on non-ASCII input).
+    assert await authorize_session_token(session_repo, session.id, "ñ") is False
 
 
 async def test_duplicate_chunk_index_rejected(db_session):
