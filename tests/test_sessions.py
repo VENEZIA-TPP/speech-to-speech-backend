@@ -113,3 +113,17 @@ async def test_two_sessions_get_different_tokens(client):
         )
         tokens.add(response.json()["ws_token"])
     assert len(tokens) == 2
+
+
+async def test_unsupported_language_pair_rejected(client):
+    response = await client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "de"}
+    )
+    assert response.status_code == 422
+
+
+async def test_supported_language_pair_accepted(client):
+    response = await client.post(
+        "/sessions/", json={"source_language": "es", "target_language": "en"}
+    )
+    assert response.status_code == 201

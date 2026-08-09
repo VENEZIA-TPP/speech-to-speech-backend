@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     TTS_MODEL: str = "stub"
     TTS_DEVICE: str = "cpu"
 
+    # Languages
+    # Pairs the pipeline will accept, as "src-tgt" CSV. Delivered scope is
+    # es<->en; the European expansion adds entries here, never in the code.
+    SUPPORTED_LANGUAGE_PAIRS: str = "es-en,en-es"
+
     # Audio processing
     AUDIO_SAMPLE_RATE: int = 16000
     AUDIO_CHUNK_DURATION_MS: int = 3000
@@ -59,6 +64,17 @@ class Settings(BaseSettings):
             f"postgresql://{self.DATABASE_USER}:{self.DATABASE_PASSWORD}"
             f"@{self.DATABASE_HOST}:{self.DATABASE_PORT}/{self.DATABASE_DB}"
         )
+
+    @property
+    def supported_language_pairs(self) -> set[tuple[str, str]]:
+        pairs = set()
+        for entry in self.SUPPORTED_LANGUAGE_PAIRS.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            source, _, target = entry.partition("-")
+            pairs.add((source, target))
+        return pairs
 
 
 settings = Settings()
