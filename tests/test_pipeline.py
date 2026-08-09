@@ -13,6 +13,7 @@ import wave
 import pytest
 from httpx import AsyncClient
 
+from app.pipeline.contracts import ASRState, MTState, SessionState, TTSState
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
 from app.services.tts_service import TTSService
@@ -21,7 +22,7 @@ from app.services.tts_service import TTSService
 # Unit tests - stub services
 async def test_asr_stub_returns_result():
     asr = ASRService("stub", "cpu")
-    result = await asr.transcribe(b"fake_audio", source_language="en")
+    result = await asr.transcribe(ASRState(), b"fake_audio", source_language="en")
 
     assert result.text
     assert result.detected_language == "en"
@@ -31,14 +32,14 @@ async def test_asr_stub_returns_result():
 
 async def test_asr_stub_auto_detects_language():
     asr = ASRService("stub", "cpu")
-    result = await asr.transcribe(b"fake_audio")
+    result = await asr.transcribe(ASRState(), b"fake_audio")
 
     assert result.detected_language is not None
 
 
 async def test_mt_stub_returns_result():
     mt = MTService("stub", "cpu")
-    result = await mt.translate("Hello world", "en", "es")
+    result = await mt.translate(MTState(), "Hello world", "en", "es")
 
     assert result.translated_text
     assert result.source_language == "en"
@@ -48,7 +49,7 @@ async def test_mt_stub_returns_result():
 
 async def test_mt_stub_preserves_language_codes():
     mt = MTService("stub", "cpu")
-    result = await mt.translate("Hola mundo", "es", "en")
+    result = await mt.translate(MTState(), "Hola mundo", "es", "en")
 
     assert result.source_language == "es"
     assert result.target_language == "en"
@@ -56,7 +57,7 @@ async def test_mt_stub_preserves_language_codes():
 
 async def test_tts_stub_returns_result():
     tts = TTSService("stub", "cpu")
-    result = await tts.synthesize("Hola mundo", "es")
+    result = await tts.synthesize(TTSState(), "Hola mundo", "es")
 
     assert result.audio_bytes
     assert result.audio_bytes[:4] == b"RIFF"
@@ -69,7 +70,7 @@ async def test_tts_stub_returns_result():
 async def test_tts_stub_output_is_watermark_tagged():
     """Synthesized output must carry the watermark/tag."""
     tts = TTSService("stub", "cpu")
-    result = await tts.synthesize("Hola mundo", "es")
+    result = await tts.synthesize(TTSState(), "Hola mundo", "es")
 
     assert result.watermarked is True
     assert result.watermark_method
@@ -115,6 +116,7 @@ async def test_pipeline_processes_chunk(db_session):
     )
 
     result = await pipeline.process_audio_chunk(
+        SessionState(),
         session_id=session.id,
         audio_bytes=b"fake_audio_chunk",
         chunk_index=0,
@@ -200,7 +202,7 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
     from app.main import app
 
     class BrokenTTSService(TTSService):
-        async def _synthesize(self, text, language, speaker_reference):
+        async def _synthesize(self, state, text, language):
             raise RuntimeError("boom")
 
     app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService("stub", "cpu")
@@ -263,7 +265,7 @@ def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
     from app.main import app
 
     class BrokenTTSService(TTSService):
-        async def _synthesize(self, text, language, speaker_reference):
+        async def _synthesize(self, state, text, language):
             raise RuntimeError("boom")
 
     app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService("stub", "cpu")

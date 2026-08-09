@@ -10,11 +10,16 @@ Flow per audio chunk:
   6. Run TTSService.synthesize() -> synthesized audio + watermark tag + latency
      (TTS output is not persisted this delivery).
   7. Return PipelineResult with all metrics + synthesized audio.
+
+Per-session streaming state (buffer, previous prompt, decoder cache) travels in
+the SessionState the WebSocket handler builds at accept() time - never on an
+engine, which is frozen. See docs/adr/0003-workers-persistentes-y-estado-por-sesion.md.
 """
 
 import time
 
 from app.models.translation_session import SessionStatus
+from app.pipeline.contracts import SessionState
 from app.repositories.interfaces.translation_session_repository import (
     ITranslationSessionRepository,
 )
@@ -48,6 +53,7 @@ class TranslationPipelineService:
 
     async def process_audio_chunk(
         self,
+        state: SessionState,
         session_id: int,
         audio_bytes: bytes,
         chunk_index: int,
@@ -60,6 +66,7 @@ class TranslationPipelineService:
 
         # ASR
         asr_result = await self.asr_service.transcribe(
+            state.asr,
             audio_bytes=audio_bytes,
             source_language=session.source_language,
         )
@@ -75,6 +82,7 @@ class TranslationPipelineService:
 
         # MT
         mt_result = await self.mt_service.translate(
+            state.mt,
             text=asr_result.text,
             source_language=asr_result.detected_language or session.source_language,
             target_language=session.target_language,
@@ -88,11 +96,13 @@ class TranslationPipelineService:
             mt_processing_time_ms=mt_result.processing_time_ms,
         )
 
-        # TTS (output not persisted this delivery)
+        # TTS (output not persisted this delivery). The voice sample rides on
+        # state.tts; the raw chunk is not a speaker reference and can no longer
+        # be passed as one.
         tts_result = await self.tts_service.synthesize(
+            state.tts,
             text=mt_result.translated_text,
             language=mt_result.target_language,
-            speaker_reference=audio_bytes,  # source speaker sample for voice cloning
         )
 
         total_ms = int((time.monotonic() - start_total) * 1000)

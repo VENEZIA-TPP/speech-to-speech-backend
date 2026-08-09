@@ -49,3 +49,42 @@ def test_engine_subclass_is_frozen():
     assert engine.model_name == "parakeet-tdt-0.6b-v3"
     with pytest.raises(FrozenInstanceError):
         engine.buffer = "leaked"
+
+
+async def test_two_sessions_do_not_share_state():
+    """Two interleaved sessions must each count their own chunks: 3 and 3, not 6.
+
+    This is barrier #4 of ADR 0003, and it runs against the real stub engine -
+    not a double written for the test - because the stub genuinely writes its
+    per-chunk memory into `state`.
+    """
+    from app.pipeline.contracts import ASRState
+
+    asr = ASRService("stub", "cpu")
+    session_a = ASRState()
+    session_b = ASRState()
+
+    for _ in range(3):
+        await asr.transcribe(session_a, b"aaa")
+        await asr.transcribe(session_b, b"bbb")
+
+    assert session_a.chunks_seen == 3
+    assert session_b.chunks_seen == 3
+    assert session_a.buffer == bytearray(b"aaa" * 3)
+    assert session_b.buffer == bytearray(b"bbb" * 3)
+
+
+async def test_engine_holds_no_state_of_its_own():
+    """After serving two sessions the engine itself must carry nothing.
+
+    No __dict__ means there is not even a place to stash an attribute: this is
+    what __slots__ buys on top of frozen (verified 2026-08-10).
+    """
+    from app.pipeline.contracts import ASRState
+
+    asr = ASRService("stub", "cpu")
+    await asr.transcribe(ASRState(), b"aaa")
+    await asr.transcribe(ASRState(), b"bbb")
+
+    assert not hasattr(asr, "__dict__")
+    assert type(asr).__slots__ == ("model_name", "device")

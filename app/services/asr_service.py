@@ -2,6 +2,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from app.pipeline.contracts import ASRState
+
 
 @dataclass
 class ASRResult:
@@ -34,14 +36,16 @@ class ASRService:
 
     async def transcribe(
         self,
+        state: ASRState,
         audio_bytes: bytes,
         source_language: Optional[str] = None,
     ) -> ASRResult:
-        # TODO: Transcribe a WAV audio chunk.
-
+        # `state` is first on purpose: the signature is what tells whoever
+        # integrates a real streaming ASR where per-session memory belongs
+        # (ADR 0003, barrier #2). The engine is frozen; self is not an option.
         start = time.monotonic()
         text, detected_language, confidence = await self._transcribe(
-            audio_bytes, source_language
+            state, audio_bytes, source_language
         )
         processing_time_ms = int((time.monotonic() - start) * 1000)
 
@@ -54,9 +58,16 @@ class ASRService:
 
     async def _transcribe(
         self,
+        state: ASRState,
         audio_bytes: bytes,
         language: Optional[str],
     ) -> tuple[str, Optional[str], Optional[float]]:
-        # TODO: Internal transcription - replace with real inference.
-
-        return "[ASR stub] transcription placeholder", language or "en", 0.95
+        # TODO: Internal transcription - replace with real inference. Buffer,
+        # previous prompt and decoder cache go on `state`, never on self.
+        state.buffer.extend(audio_bytes)
+        state.chunks_seen += 1
+        return (
+            f"[ASR stub] transcription placeholder (chunk {state.chunks_seen})",
+            language or "en",
+            0.95,
+        )

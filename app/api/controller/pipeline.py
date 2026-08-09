@@ -4,6 +4,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 
 from app.core.config import settings
 from app.dependencies import get_pipeline_service
+from app.pipeline.contracts import SessionState
 from app.services.translation_pipeline_service import TranslationPipelineService
 
 router = APIRouter()
@@ -47,6 +48,11 @@ async def pipeline_websocket(
 
     await websocket.accept(subprotocol=echo_subprotocol)
 
+    # Born with the connection, dies with this coroutine. There is no global
+    # session_id -> state map to index wrong, and the engines are frozen, so
+    # this is the only place per-session streaming state can live (ADR 0003).
+    state = SessionState()
+
     chunk_index = 0
     # True once this handler has decided the session's terminal status, so the
     # cleanup below cannot overwrite a FAILED session with COMPLETED.
@@ -84,6 +90,7 @@ async def pipeline_websocket(
                     break
                 try:
                     result = await pipeline_service.process_audio_chunk(
+                        state,
                         session_id=session_id,
                         audio_bytes=data["bytes"],
                         chunk_index=chunk_index,

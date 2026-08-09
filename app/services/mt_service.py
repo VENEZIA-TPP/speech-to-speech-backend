@@ -2,6 +2,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from app.pipeline.contracts import MTState
+
 
 @dataclass
 class MTResult:
@@ -24,13 +26,16 @@ class MTService:
 
     async def translate(
         self,
+        state: MTState,
         text: str,
         source_language: str,
         target_language: str,
     ) -> MTResult:
         # TODO: Translate text from source_language to target_language.
         start = time.monotonic()
-        translated = await self._translate(text, source_language, target_language)
+        translated = await self._translate(
+            state, text, source_language, target_language
+        )
         processing_time_ms = int((time.monotonic() - start) * 1000)
 
         return MTResult(
@@ -41,8 +46,14 @@ class MTService:
         )
 
     async def _translate(
-        self, text: str, source_language: str, target_language: str
+        self,
+        state: MTState,
+        text: str,
+        source_language: str,
+        target_language: str,
     ) -> str:
-        # TODO: Internal translation  replace with real inference.
-
+        # TODO: Internal translation - replace with real inference. Per-session
+        # context goes on `state`; the per-language-pair model cache belongs on
+        # the engine and is read-only at runtime (ADR 0003).
+        state.segments_seen += 1
         return f"[MT stub] {source_language}->{target_language}: {text}"

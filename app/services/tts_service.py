@@ -4,6 +4,8 @@ import wave
 from dataclasses import dataclass
 from typing import Optional
 
+from app.pipeline.contracts import TTSState
+
 _STUB_SAMPLE_RATE = 16000
 _STUB_DURATION_MS = 300
 
@@ -30,15 +32,16 @@ class TTSService:
 
     async def synthesize(
         self,
+        state: TTSState,
         text: str,
         language: str,
-        speaker_reference: Optional[bytes] = None,
     ) -> TTSResult:
-        # TODO: Synthesize speech for a translated segment. speaker_reference is
-        # the voice sample to clone once the real model lands; the stub ignores it.
+        # No speaker parameter: the voice sample is state.speaker, sealed once
+        # per session by the segmenter (PR 12). Passing the current audio chunk
+        # as a speaker reference - the Fase 0 bug - is no longer expressible.
         start = time.monotonic()
         audio_bytes, sample_rate, duration_ms = await self._synthesize(
-            text, language, speaker_reference
+            state, text, language
         )
         # Watermark applied here so a real _synthesize() cannot skip it.
         audio_bytes, watermarked, watermark_method = self._apply_watermark(audio_bytes)
@@ -55,12 +58,14 @@ class TTSService:
 
     async def _synthesize(
         self,
+        state: TTSState,
         text: str,
         language: str,
-        speaker_reference: Optional[bytes],
     ) -> tuple[bytes, int, int]:
-        # TODO: Internal synthesis - replace with real inference. Heavy inference
-        # must run in an executor/worker, never inline on the event loop.
+        # TODO: Internal synthesis - replace with real inference. Heavy
+        # inference must run in an executor/worker, never inline on the event
+        # loop. Clone from state.speaker when it is sealed; None means the
+        # default voice - explicit degradation, never silent cloning.
 
         n_frames = int(_STUB_SAMPLE_RATE * _STUB_DURATION_MS / 1000)
         buffer = io.BytesIO()
