@@ -18,11 +18,15 @@ class TTSResult:
     processing_time_ms: int
 
 
+@dataclass(frozen=True)
 class TTSService:
-    def __init__(self, model_name: str = "stub", device: str = "cpu"):
-        self.model_name = model_name
-        self.device = device
-        # TODO: load real model
+    """Immutable and shared process-wide. See ASRService for the full rationale
+    (ADR 0003, barrier #1).
+    """
+
+    __slots__ = ("model_name", "device")
+    model_name: str
+    device: str
 
     async def synthesize(
         self,

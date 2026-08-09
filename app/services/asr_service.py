@@ -11,21 +11,38 @@ class ASRResult:
     processing_time_ms: int
 
 
+@dataclass(frozen=True)
 class ASRService:
-    def __init__(self, model_name: str = "stub", device: str = "cpu"):
-        self.model_name = model_name
-        self.device = device
-        # TODO: load real model
+    """Immutable and shared process-wide across every session.
+
+    frozen + a hand-written __slots__ means `engine.buffer = ...` raises
+    FrozenInstanceError for declared fields AND for new names alike, so
+    per-session state has nowhere to hide (ADR 0003, barrier #1). slots=True
+    would raise an unreadable TypeError for new names instead.
+
+    No field defaults: __slots__ and class-level defaults are mutually
+    exclusive (ValueError at import time). Callers pass both values.
+
+    A real backend subclasses this as a @dataclass(frozen=True) with
+    __slots__ = () - a plain subclass gets a __dict__ back and loses the
+    barrier.
+    """
+
+    __slots__ = ("model_name", "device")
+    model_name: str
+    device: str
 
     async def transcribe(
         self,
         audio_bytes: bytes,
         source_language: Optional[str] = None,
     ) -> ASRResult:
-        #TODO: Transcribe a WAV audio chunk.
+        # TODO: Transcribe a WAV audio chunk.
 
         start = time.monotonic()
-        text, detected_language, confidence = await self._transcribe(audio_bytes, source_language)
+        text, detected_language, confidence = await self._transcribe(
+            audio_bytes, source_language
+        )
         processing_time_ms = int((time.monotonic() - start) * 1000)
 
         return ASRResult(
