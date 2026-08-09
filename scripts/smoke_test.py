@@ -38,7 +38,7 @@ def make_wav() -> bytes:
     return buffer.getvalue()
 
 
-def create_session() -> int:
+def create_session() -> tuple[int, str]:
     payload = json.dumps({"source_language": "es", "target_language": "en"}).encode()
     request = urllib.request.Request(
         f"{BASE_URL}/sessions/",
@@ -48,13 +48,13 @@ def create_session() -> int:
     with urllib.request.urlopen(request) as response:
         session = json.load(response)
     print(f"session {session['id']} created ({session['status']})")
-    return session["id"]
+    return session["id"], session["ws_token"]
 
 
-async def stream(session_id: int, audio: bytes) -> None:
+async def stream(session_id: int, token: str, audio: bytes) -> None:
     ws_url = f"{BASE_URL.replace('http', 'ws', 1)}/pipeline/ws/{session_id}"
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, subprotocols=[token]) as ws:
         for i in range(CHUNKS):
             await ws.send(audio)
 
@@ -93,8 +93,8 @@ async def stream(session_id: int, audio: bytes) -> None:
 
 
 def main() -> None:
-    session_id = create_session()
-    asyncio.run(stream(session_id, make_wav()))
+    session_id, token = create_session()
+    asyncio.run(stream(session_id, token, make_wav()))
     print("OK")
 
 

@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +32,7 @@ def setup_middlewares(app: FastAPI):
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # TODO: luego cambiar por la direccion
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],

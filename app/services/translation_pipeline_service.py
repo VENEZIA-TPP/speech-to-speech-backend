@@ -11,15 +11,21 @@ Flow per audio chunk:
      (TTS output is not persisted this delivery).
   7. Return PipelineResult with all metrics + synthesized audio.
 """
+
 import time
 
 from app.models.translation_session import SessionStatus
-from app.repositories.interfaces.translation_session_repository import ITranslationSessionRepository
-from app.repositories.interfaces.transcription_repository import ITranscriptionRepository
+from app.repositories.interfaces.translation_session_repository import (
+    ITranslationSessionRepository,
+)
+from app.repositories.interfaces.transcription_repository import (
+    ITranscriptionRepository,
+)
 from app.repositories.interfaces.translation_repository import ITranslationRepository
 from app.schemas.translation import PipelineResult
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
+from app.services.session_auth import authorize_session_token
 from app.services.tts_service import TTSService
 
 
@@ -107,6 +113,14 @@ class TranslationPipelineService:
             watermark_method=tts_result.watermark_method,
             synthesized_audio=tts_result.audio_bytes,
         )
+
+    async def authorize(self, session_id: int, token: str | None) -> bool:
+        """Constant-time check that `token` is this session's ws_token.
+
+        Lives in the service, not the controller: it is an authorization rule
+        and it needs the repository.
+        """
+        return await authorize_session_token(self.session_repo, session_id, token)
 
     async def complete_session(self, session_id: int) -> None:
         await self.session_repo.update_status(session_id, SessionStatus.COMPLETED)

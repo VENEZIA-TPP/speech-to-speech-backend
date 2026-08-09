@@ -2,16 +2,20 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.dependencies import get_session_service
+from app.dependencies import get_session_service, require_session_token
 from app.schemas.transcription import TranscriptionRead
 from app.schemas.translation import TranslationRead
-from app.schemas.translation_session import TranslationSessionCreate, TranslationSessionRead
+from app.schemas.translation_session import (
+    TranslationSessionCreate,
+    TranslationSessionCreated,
+    TranslationSessionRead,
+)
 from app.services.session_service import SessionService
 
 router = APIRouter()
 
 
-@router.post("/", response_model=TranslationSessionRead, status_code=201)
+@router.post("/", response_model=TranslationSessionCreated, status_code=201)
 async def create_session(
     session_in: TranslationSessionCreate,
     service: SessionService = Depends(get_session_service),
@@ -23,6 +27,7 @@ async def create_session(
 async def get_session(
     session_id: int,
     service: SessionService = Depends(get_session_service),
+    _: None = Depends(require_session_token),
 ):
     session = await service.get_session(session_id)
     if session is None:
@@ -34,6 +39,7 @@ async def get_session(
 async def complete_session(
     session_id: int,
     service: SessionService = Depends(get_session_service),
+    _: None = Depends(require_session_token),
 ):
     session = await service.complete_session(session_id)
     if session is None:
@@ -45,6 +51,7 @@ async def complete_session(
 async def delete_session(
     session_id: int,
     service: SessionService = Depends(get_session_service),
+    _: None = Depends(require_session_token),
 ):
     deleted = await service.delete_session(session_id)
     if not deleted:
@@ -55,6 +62,7 @@ async def delete_session(
 async def get_session_transcriptions(
     session_id: int,
     service: SessionService = Depends(get_session_service),
+    _: None = Depends(require_session_token),
 ):
     session = await service.get_session(session_id)
     if session is None:
@@ -66,6 +74,7 @@ async def get_session_transcriptions(
 async def get_session_translations(
     session_id: int,
     service: SessionService = Depends(get_session_service),
+    _: None = Depends(require_session_token),
 ):
     session = await service.get_session(session_id)
     if session is None:

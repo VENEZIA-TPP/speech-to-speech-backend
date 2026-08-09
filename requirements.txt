@@ -20,7 +20,6 @@ python-dotenv
 pytest
 pytest-asyncio
 httpx
-httpx2  
 aiosqlite
 
 # Code quality

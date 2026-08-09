@@ -6,9 +6,11 @@ When real models are integrated:
   - Add latency threshold assertions (e.g. total_processing_time_ms < 5000).
   - Add BLEU score evaluation against a reference translation corpus.
 """
+
 import io
 import wave
 
+import pytest
 from httpx import AsyncClient
 
 from app.services.asr_service import ASRService
@@ -86,8 +88,12 @@ async def test_health_endpoint(client: AsyncClient):
 
 async def test_pipeline_processes_chunk(db_session):
     from app.services.translation_pipeline_service import TranslationPipelineService
-    from app.repositories.translation_session_repository import SQLAlchemyTranslationSessionRepository
-    from app.repositories.transcription_repository import SQLAlchemyTranscriptionRepository
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.repositories.transcription_repository import (
+        SQLAlchemyTranscriptionRepository,
+    )
     from app.repositories.translation_repository import SQLAlchemyTranslationRepository
     from app.schemas.translation_session import TranslationSessionCreate
 
@@ -95,7 +101,9 @@ async def test_pipeline_processes_chunk(db_session):
     transcription_repo = SQLAlchemyTranscriptionRepository(db_session)
     translation_repo = SQLAlchemyTranslationRepository(db_session)
 
-    session = await session_repo.create(TranslationSessionCreate(source_language="en", target_language="es"))
+    session = await session_repo.create(
+        TranslationSessionCreate(source_language="en", target_language="es")
+    )
 
     pipeline = TranslationPipelineService(
         session_repo=session_repo,
@@ -117,8 +125,13 @@ async def test_pipeline_processes_chunk(db_session):
     assert result.translated_text
     assert result.source_language == "en"
     assert result.target_language == "es"
-    assert result.total_processing_time_ms is not None and result.total_processing_time_ms >= 0
-    assert result.tts_processing_time_ms is not None and result.tts_processing_time_ms >= 0
+    assert (
+        result.total_processing_time_ms is not None
+        and result.total_processing_time_ms >= 0
+    )
+    assert (
+        result.tts_processing_time_ms is not None and result.tts_processing_time_ms >= 0
+    )
     assert result.watermarked is True
     assert result.watermark_method
     assert result.synthesized_audio[:4] == b"RIFF"
@@ -140,7 +153,10 @@ def test_ws_pipeline_full_stub_flow(ws_client):
     assert created.status_code == 201
     session_id = created.json()["id"]
 
-    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+    token = created.json()["ws_token"]
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
         ws.send_bytes(b"fake_audio_chunk")
 
         msg = ws.receive_json()
@@ -164,13 +180,18 @@ def test_ws_pipeline_full_stub_flow(ws_client):
         assert done["total_chunks"] == 1
 
 
-def test_ws_unknown_session_returns_error(ws_client):
-    with ws_client.websocket_connect("/pipeline/ws/99999") as ws:
-        ws.send_bytes(b"fake_audio_chunk")
-        msg = ws.receive_json()
-        assert "error" in msg
-        # error paths never emit a trailing binary frame
-        assert ws.receive()["type"] == "websocket.close"
+def test_ws_unknown_session_is_rejected(ws_client):
+    """Una sesión inexistente se rechaza en la autorización, antes del pipeline.
+
+    Manda un frame primero: si el chequeo de auth se regresiona, el servidor
+    responde con algo (en vez de bloquear en receive()) y el test falla limpio
+    en vez de colgarse - no hay pytest-timeout configurado.
+    """
+    with ws_client.websocket_connect(
+        "/pipeline/ws/99999", subprotocols=["whatever"]
+    ) as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
 
 
 def test_ws_pipeline_error_marks_session_failed(ws_client):
@@ -188,11 +209,295 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     )
     session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
 
-    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
         ws.send_bytes(b"fake_audio_chunk")
         msg = ws.receive_json()
         assert "Pipeline error" in msg["error"]
         assert ws.receive()["type"] == "websocket.close"
 
-    assert ws_client.get(f"/sessions/{session_id}").json()["status"] == "failed"
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
+
+
+def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):
+    """Cerrar el socket sin mandar "END" no puede dejar la fila en ACTIVE."""
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        ws.receive_json()
+        ws.receive_bytes()
+        # Close from the client side ourselves, then wait for the server's own
+        # close frame. This forces the test to observe the disconnect branch
+        # actually running server-side: letting the `with` block's own
+        # teardown do the closing races the handler's pending receive() against
+        # an unconditional cancel and passes whether or not that branch exists
+        # (verified via mutation - see test-1-report.md).
+        ws.close()
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        != "active"
+    )
+
+
+def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
+    """Un fallo del pipeline marca FAILED, y la desconexión no puede pisarlo con COMPLETED."""
+    from app.dependencies import get_tts_service
+    from app.main import app
+
+    class BrokenTTSService(TTSService):
+        async def _synthesize(self, text, language, speaker_reference):
+            raise RuntimeError("boom")
+
+    app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService()
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        assert "Pipeline error" in ws.receive_json()["error"]
+        # A diferencia de test_ws_pipeline_error_marks_session_failed, NO se lee
+        # el frame de cierre: se sale del bloque directamente.
+
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
+
+
+def test_ws_rejects_missing_token(ws_client):
+    """Manda un frame primero: si el chequeo de auth se regresiona, el servidor
+    responde (en vez de bloquear en receive()) y el test falla limpio en vez de
+    colgarse - no hay pytest-timeout configurado."""
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+
+    with ws_client.websocket_connect(f"/pipeline/ws/{session_id}") as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
+
+
+def test_ws_rejects_foreign_session_token(ws_client):
+    """El token de la sesión A no abre la sesión B."""
+    a = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+    b = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{b['id']}", subprotocols=[a["ws_token"]]
+    ) as ws:
+        ws.send_bytes(b"x")
+        assert ws.receive()["code"] == 4401
+
+    b_headers = {"Authorization": f"Bearer {b['ws_token']}"}
+    assert (
+        ws_client.get(f"/sessions/{b['id']}", headers=b_headers).json()["status"]
+        == "active"
+    )
+
+
+def test_ws_accepts_own_token(ws_client):
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        # A browser that offers a subprotocol and doesn't get one echoed back
+        # in the handshake response treats the connection as failed to open -
+        # this is the regression guard for that (see fix round 1 report).
+        assert ws.accepted_subprotocol == created["ws_token"]
+        ws.send_bytes(b"fake_audio_chunk")
+        assert ws.receive_json()["chunk_index"] == 0
+        ws.receive_bytes()
+        ws.send_text("END")
+        assert ws.receive_json()["status"] == "completed"
+
+
+def test_ws_rejects_oversized_frame(ws_client):
+    from app.core.config import settings
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        ws.send_bytes(b"\x00" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
+        assert ws.receive()["code"] == 1009  # RFC 6455: message too big
+
+
+def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck():
+    """A UniqueConstraint violation mid-chunk (e.g. a client reconnecting and
+    resending chunk_index=0) must not poison the shared AsyncSession into
+    PendingRollbackError for the rest of the request. Without the fix,
+    fail_session()/complete_session() both reuse that poisoned session and
+    raise in turn, so the handler never decides a terminal status and the
+    session is stuck at whatever it was (the exact bug this branch's first
+    commit fixed, reopened via a different trigger).
+
+    Seeds the colliding chunk_index=0 row directly via the repositories,
+    before the TestClient/WS portal exists, rather than via the ws_client
+    fixture + a second real WS connection: StaticPool's single aiosqlite
+    connection does not survive a websocket_connect() context's teardown
+    cancelling an in-flight statement on it, so driving this through two
+    sequential real WS connections is flaky at the test-harness level and
+    unrelated to the bug under test.
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from app.db.base import Base
+    from app.db.session import get_session
+    from app.main import app
+    from app.repositories.transcription_repository import (
+        SQLAlchemyTranscriptionRepository,
+    )
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.schemas.translation_session import TranslationSessionCreate
+    from tests.conftest import TestSessionLocal, _run_ddl, override_get_session
+
+    async def setup():
+        await _run_ddl(Base.metadata.create_all)
+        async with TestSessionLocal() as session:
+            session_repo = SQLAlchemyTranslationSessionRepository(session)
+            created = await session_repo.create(
+                TranslationSessionCreate(source_language="en", target_language="es")
+            )
+            transcription_repo = SQLAlchemyTranscriptionRepository(session)
+            await transcription_repo.create(
+                session_id=created.id,
+                chunk_index=0,
+                original_text="existing",
+                detected_language="en",
+                confidence=None,
+                asr_processing_time_ms=1,
+            )
+            return created.id, created.ws_token
+
+    session_id, token = asyncio.run(setup())
+
+    app.dependency_overrides[get_session] = override_get_session
+    try:
+        with TestClient(app) as tc:
+            headers = {"Authorization": f"Bearer {token}"}
+            with tc.websocket_connect(
+                f"/pipeline/ws/{session_id}", subprotocols=[token]
+            ) as ws:
+                ws.send_bytes(b"fake_audio_chunk")
+                msg = ws.receive_json()
+                assert "error" in msg
+                assert ws.receive()["type"] == "websocket.close"
+
+            assert (
+                tc.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+                == "failed"
+            )
+    finally:
+        app.dependency_overrides.clear()
+        asyncio.run(_run_ddl(Base.metadata.drop_all))
+
+
+async def test_authorize_session_token_rejects_missing_and_wrong_and_none(db_session):
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.schemas.translation_session import TranslationSessionCreate
+    from app.services.session_auth import authorize_session_token
+
+    session_repo = SQLAlchemyTranslationSessionRepository(db_session)
+    session = await session_repo.create(
+        TranslationSessionCreate(source_language="en", target_language="es")
+    )
+
+    assert (
+        await authorize_session_token(session_repo, session.id, session.ws_token)
+        is True
+    )
+    assert (
+        await authorize_session_token(session_repo, session.id, "wrong-token") is False
+    )
+    assert await authorize_session_token(session_repo, session.id, None) is False
+    assert (
+        await authorize_session_token(session_repo, 999999, session.ws_token) is False
+    )
+    # Non-ASCII must not crash the constant-time compare (both operands are
+    # bytes via .encode(), which never raises on non-ASCII input).
+    assert await authorize_session_token(session_repo, session.id, "ñ") is False
+
+
+async def test_duplicate_chunk_index_rejected(db_session):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.repositories.translation_session_repository import (
+        SQLAlchemyTranslationSessionRepository,
+    )
+    from app.repositories.transcription_repository import (
+        SQLAlchemyTranscriptionRepository,
+    )
+    from app.schemas.translation_session import TranslationSessionCreate
+
+    session_repo = SQLAlchemyTranslationSessionRepository(db_session)
+    transcription_repo = SQLAlchemyTranscriptionRepository(db_session)
+
+    session = await session_repo.create(
+        TranslationSessionCreate(source_language="en", target_language="es")
+    )
+
+    await transcription_repo.create(
+        session_id=session.id,
+        chunk_index=0,
+        original_text="first",
+        detected_language="en",
+        confidence=None,
+        asr_processing_time_ms=1,
+    )
+
+    with pytest.raises(IntegrityError):
+        await transcription_repo.create(
+            session_id=session.id,
+            chunk_index=0,
+            original_text="duplicate",
+            detected_language="en",
+            confidence=None,
+            asr_processing_time_ms=1,
+        )
+
+    # The failed INSERT leaves the transaction poisoned; without this rollback
+    # the fixture's drop_all fails and the error surfaces as a teardown cascade
+    # in unrelated tests.
+    await db_session.rollback()
