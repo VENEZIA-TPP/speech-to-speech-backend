@@ -5,13 +5,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.dependencies import get_session_service
 from app.schemas.transcription import TranscriptionRead
 from app.schemas.translation import TranslationRead
-from app.schemas.translation_session import TranslationSessionCreate, TranslationSessionRead
+from app.schemas.translation_session import (
+    TranslationSessionCreate,
+    TranslationSessionCreated,
+    TranslationSessionRead,
+)
 from app.services.session_service import SessionService
 
 router = APIRouter()
 
 
-@router.post("/", response_model=TranslationSessionRead, status_code=201)
+@router.post("/", response_model=TranslationSessionCreated, status_code=201)
 async def create_session(
     session_in: TranslationSessionCreate,
     service: SessionService = Depends(get_session_service),

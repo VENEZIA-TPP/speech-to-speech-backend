@@ -22,3 +22,10 @@ class TranslationSessionRead(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class TranslationSessionCreated(TranslationSessionRead):
+    """POST /sessions/ only. The token is never echoed by GET - otherwise the
+    IDOR this token exists to close would simply move to the read endpoint."""
+
+    ws_token: str
