@@ -70,8 +70,6 @@ async def test_two_sessions_do_not_share_state():
 
     assert session_a.chunks_seen == 3
     assert session_b.chunks_seen == 3
-    assert session_a.buffer == bytearray(b"aaa" * 3)
-    assert session_b.buffer == bytearray(b"bbb" * 3)
 
 
 async def test_engine_holds_no_state_of_its_own():

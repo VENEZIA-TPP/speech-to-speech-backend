@@ -150,6 +150,12 @@ async def test_pipeline_processes_chunk(db_session):
 
 # E2E - WebSocket protocol (full stub pipeline)
 def test_ws_pipeline_full_stub_flow(ws_client):
+    """Also proves SessionState survives across chunks within one connection.
+
+    Passes falsely if `state = SessionState()` moves inside the receive loop
+    in app/api/controller/pipeline.py - the second chunk's ASR counter would
+    reset to 1 instead of advancing to 2.
+    """
     created = ws_client.post(
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     )
@@ -165,6 +171,7 @@ def test_ws_pipeline_full_stub_flow(ws_client):
         msg = ws.receive_json()
         assert msg["chunk_index"] == 0
         assert msg["original_text"]
+        assert "chunk 1" in msg["original_text"]
         assert msg["translated_text"]
         assert msg["asr_processing_time_ms"] >= 0
         assert msg["mt_processing_time_ms"] >= 0
@@ -177,10 +184,19 @@ def test_ws_pipeline_full_stub_flow(ws_client):
         assert len(audio) == msg["synthesized_audio_size_bytes"]
         assert audio[:4] == b"RIFF"
 
+        ws.send_bytes(b"fake_audio_chunk_2")
+
+        msg2 = ws.receive_json()
+        assert msg2["chunk_index"] == 1
+        assert "chunk 2" in msg2["original_text"]
+
+        audio2 = ws.receive_bytes()
+        assert len(audio2) == msg2["synthesized_audio_size_bytes"]
+
         ws.send_text("END")
         done = ws.receive_json()
         assert done["status"] == "completed"
-        assert done["total_chunks"] == 1
+        assert done["total_chunks"] == 2
 
 
 def test_ws_unknown_session_is_rejected(ws_client):

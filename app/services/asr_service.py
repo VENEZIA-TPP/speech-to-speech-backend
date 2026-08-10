@@ -64,7 +64,8 @@ class ASRService:
     ) -> tuple[str, Optional[str], Optional[float]]:
         # TODO: Internal transcription - replace with real inference. Buffer,
         # previous prompt and decoder cache go on `state`, never on self.
-        state.buffer.extend(audio_bytes)
+        # ponytail: stub doesn't need the audio bytes, so it doesn't buffer
+        # them - state.buffer stays declared for the real streaming backend.
         state.chunks_seen += 1
         return (
             f"[ASR stub] transcription placeholder (chunk {state.chunks_seen})",

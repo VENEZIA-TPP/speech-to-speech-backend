@@ -1,6 +1,5 @@
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from app.pipeline.contracts import MTState
 
