@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Speech-to-Speech Translation API")
-    logger.info(f"ASR model: {settings.ASR_MODEL} | MT model: {settings.MT_MODEL}")
+    logger.info(
+        f"ASR model: {settings.ASR_MODEL} | MT model: {settings.MT_MODEL} "
+        f"| TTS model: {settings.TTS_MODEL}"
+    )
     yield
     logger.info("Shutting down Speech-to-Speech Translation API")
     await engine.dispose()
@@ -26,7 +29,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Speech-to-Speech Translation API",
-    description="Real-time speech translation pipeline: ASR -> MT (-> TTS in future deliveries)",
+    description="Real-time speech translation pipeline: ASR -> MT -> TTS",
     version="0.1.0",
     lifespan=lifespan,
 )

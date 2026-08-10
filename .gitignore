@@ -10,3 +10,11 @@ __pycache__/
 .vscode/
 .env.local
 .DS_Store
+
+# AI Agents
+.agents/
+.claude/
+.superpowers/
+skills-lock.json
+CLAUDE.md
+refs/

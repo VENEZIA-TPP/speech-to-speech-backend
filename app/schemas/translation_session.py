@@ -1,12 +1,24 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
+from app.core.config import settings
 from app.models.translation_session import SessionStatus
 
 
 class TranslationSessionCreate(BaseModel):
     source_language: str = "en"
     target_language: str = "es"
+
+    @model_validator(mode="after")
+    def _pair_is_supported(self):
+        pair = (self.source_language, self.target_language)
+        if pair not in settings.supported_language_pairs:
+            raise ValueError(
+                f"Unsupported language pair {self.source_language}->"
+                f"{self.target_language}. Supported: "
+                f"{settings.SUPPORTED_LANGUAGE_PAIRS}"
+            )
+        return self
 
 
 class TranslationSessionUpdate(BaseModel):
@@ -22,3 +34,10 @@ class TranslationSessionRead(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class TranslationSessionCreated(TranslationSessionRead):
+    """POST /sessions/ only. The token is never echoed by GET - otherwise the
+    IDOR this token exists to close would simply move to the read endpoint."""
+
+    ws_token: str
