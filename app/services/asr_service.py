@@ -1,8 +1,18 @@
 import time
+import anyio
+from anyio import CapacityLimiter
 from dataclasses import dataclass
 from typing import Optional
 
 from app.pipeline.contracts import ASRState
+
+# Un token por etapa. Sin este limiter el despacho caeria en el pool de
+# threads por defecto - 40 tokens compartidos con las dependencias sincronas
+# del framework - y hasta 40 inferencias podrian salir en paralelo contra una
+# sola GPU. El limiter vive en el modulo, no en la instancia: el engine es un
+# dataclass congelado sin __dict__, y de todos modos hay exactamente un engine
+# por etapa por proceso, que es la misma cardinalidad.
+_LIMITER = CapacityLimiter(1)
 
 
 @dataclass
@@ -44,8 +54,8 @@ class ASRService:
         # integrates a real streaming ASR where per-session memory belongs
         # (ADR 0003, barrier #2). The engine is frozen; self is not an option.
         start = time.monotonic()
-        text, detected_language, confidence = await self._transcribe(
-            state, audio_bytes, source_language
+        text, detected_language, confidence = await anyio.to_thread.run_sync(
+            self._transcribe, state, audio_bytes, source_language, limiter=_LIMITER
         )
         processing_time_ms = int((time.monotonic() - start) * 1000)
 
@@ -56,12 +66,15 @@ class ASRService:
             processing_time_ms=processing_time_ms,
         )
 
-    async def _transcribe(
+    def _transcribe(
         self,
         state: ASRState,
         audio_bytes: bytes,
         language: Optional[str],
     ) -> tuple[str, Optional[str], Optional[float]]:
+        # Sincrono a proposito: es el punto de reemplazo por un modelo real, y
+        # la inferencia real bloquea. transcribe() lo despacha a un thread, asi
+        # que un `await` aca adentro no tendria loop donde correr.
         # TODO: Internal transcription - replace with real inference. Buffer,
         # previous prompt and decoder cache go on `state`, never on self.
         # Stub doesn't need the audio bytes, so it doesn't buffer
