@@ -119,6 +119,10 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
+Run a **single process**. The ASR/MT/TTS engines are built once per process at
+startup, so `uvicorn --workers N` loads N copies of the models and multiplies the
+VRAM by N. Scale sessions per process, not workers.
+
 ## Migrations
 
 ```bash

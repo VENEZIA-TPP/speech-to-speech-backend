@@ -7,6 +7,7 @@ from app.api.api import api_router
 from app.core.config import settings
 from app.core.middleware import setup_middlewares
 from app.db.session import engine
+from app.dependencies import init_engines
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,8 +23,14 @@ async def lifespan(app: FastAPI):
         f"ASR model: {settings.ASR_MODEL} | MT model: {settings.MT_MODEL} "
         f"| TTS model: {settings.TTS_MODEL}"
     )
+    # One process, many sessions: the three engines are built here, once,
+    # before the app accepts traffic. `uvicorn --workers N` means N processes
+    # and N times the VRAM.
+    init_engines()
     yield
     logger.info("Shutting down Speech-to-Speech Translation API")
+    # No engine teardown while all three are stubs - there is
+    # nothing to release. CUDA/ONNX release lands with the real backend.
     await engine.dispose()
 
 

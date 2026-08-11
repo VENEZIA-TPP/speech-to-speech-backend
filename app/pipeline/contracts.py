@@ -74,7 +74,7 @@ class WatermarkedAudio:
         other audio, a property cannot. PR 12 persists this to prove after the
         fact that a given output was tagged.
         """
-        # ponytail: recomputed per call - hashing 300 ms of PCM is microseconds.
+        # Recomputed per call - hashing 300 ms of PCM is microseconds.
         # Cache it only if a profile ever says to.
         return hashlib.sha256(self.data).hexdigest()
 

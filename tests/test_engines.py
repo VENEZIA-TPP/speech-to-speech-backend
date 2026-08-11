@@ -24,8 +24,7 @@ def test_engine_is_frozen(engine, attribute):
     """A declared field AND a brand-new name must raise the SAME exception type.
 
     That stability is the whole reason __slots__ is written by hand instead of
-    using slots=True, which raises an unreadable TypeError for new names
-    (reproduced in docs/investigacion/fase-3-arquitectura.md section 0).
+    using slots=True, which raises an unreadable TypeError for new names.
     `engine.buffer = ...` is the exact accident this PR exists to prevent.
     """
     with pytest.raises(FrozenInstanceError):
