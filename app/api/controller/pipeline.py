@@ -130,6 +130,14 @@ async def pipeline_websocket(
             # Audio chunk (binary)
             if "bytes" in data:
                 if len(data["bytes"]) > settings.MAX_AUDIO_FRAME_BYTES:
+                    # Status write happens-before the close signal, like every
+                    # other terminal path below - a client that has observed
+                    # the close already knows the session's status landed, so
+                    # nothing is left in flight for a concurrent shutdown (the
+                    # test harness tearing down its DB) to race against.
+                    with contextlib.suppress(Exception):
+                        await pipeline_service.complete_session(session_id)
+                    status_decided = True
                     await websocket.close(code=1009)  # RFC 6455: message too big
                     break
                 try:
@@ -140,6 +148,15 @@ async def pipeline_websocket(
                         chunk_index=segment_index,
                     )
                 except ValueError as exc:
+                    # Same terminal status as the except Exception branch below,
+                    # for the same reason: a session that failed mid-chunk must
+                    # not be left for the finally block to mark COMPLETED. The
+                    # suppress guards against fail_session()'s own write failing
+                    # (a rollback trip, a DB blip) escaping as a second
+                    # exception, which would skip the error event below.
+                    with contextlib.suppress(Exception):
+                        await pipeline_service.fail_session(session_id)
+                    status_decided = True
                     await _send(
                         websocket,
                         ErrorEvent(

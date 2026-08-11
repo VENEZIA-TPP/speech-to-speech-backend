@@ -176,8 +176,8 @@ def test_ws_pipeline_full_stub_flow(ws_client):
     Both chunks are sent before a single reply is read: nothing in the
     protocol lets the client assume a response arrives before it may send
     again. Also proves SessionState survives across chunks within one
-    connection - it passes falsely if `state = SessionState()` moves inside
-    the receive loop in app/api/controller/pipeline.py, because the second
+    connection - it fails if `state = SessionState()` moves inside the
+    receive loop in app/api/controller/pipeline.py, because the second
     segment's ASR counter would reset to 1 instead of advancing to 2.
     """
     created = ws_client.post(
@@ -318,6 +318,47 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
         assert msg["code"] == "pipeline_failed"
         assert msg["segment_index"] == 0
         assert "Pipeline error" in msg["message"]
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
+
+
+def test_ws_pipeline_value_error_marks_session_failed(ws_client):
+    """A ValueError out of process_audio_chunk() must fail the session too.
+
+    Same wire label (`pipeline_failed`) as the RuntimeError path covered by
+    test_ws_pipeline_error_marks_session_failed, but ValueError is caught by
+    its own except clause - this guards that clause marks the session FAILED
+    just like its sibling, instead of leaving it for the finally block to
+    mark COMPLETED.
+    """
+    from app.dependencies import get_asr_service
+    from app.main import app
+
+    class BrokenASRService(ASRService):
+        async def _transcribe(self, state, audio_bytes, language):
+            raise ValueError("boom")
+
+    app.dependency_overrides[get_asr_service] = lambda: BrokenASRService("stub", "cpu")
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        ws.send_bytes(b"fake_audio_chunk")
+        msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["code"] == "pipeline_failed"
         assert ws.receive()["type"] == "websocket.close"
 
     assert (
