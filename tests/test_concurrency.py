@@ -106,3 +106,37 @@ def test_event_loop_stays_responsive_during_inference(ws_client, stage):
         f"{BLOCKING_SECONDS}s en vuelo en la etapa {stage}: el event loop "
         f"quedo congelado para todas las conexiones del proceso"
     )
+
+
+async def test_inference_stage_is_serialized():
+    """Dos inferencias de la misma etapa no pueden solaparse.
+
+    El limiter de un token es lo que serializa el acceso a la GPU. Sin el, el
+    despacho usaria el pool de threads por defecto - 40 tokens, compartidos
+    con las dependencias sincronas del framework - y las dos inferencias
+    saldrian en paralelo. El canario de arriba no ve esa diferencia: sin
+    limiter el event loop queda libre igual.
+    """
+    from app.pipeline.contracts import ASRState
+
+    sleep_seconds = 0.3
+
+    class SlowASRService(ASRService):
+        def _transcribe(self, state, audio_bytes, language):
+            time.sleep(sleep_seconds)
+            return ("slow", language or "en", 1.0)
+
+    engine = SlowASRService("stub", "cpu")
+
+    start = time.monotonic()
+    await asyncio.gather(
+        engine.transcribe(ASRState(), b"aaa"),
+        engine.transcribe(ASRState(), b"bbb"),
+    )
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 2 * sleep_seconds, (
+        f"dos inferencias de la misma etapa tardaron {elapsed:.3f}s en vez de "
+        f"al menos {2 * sleep_seconds}s: salieron en paralelo, el limiter de "
+        f"un token no se esta aplicando"
+    )
