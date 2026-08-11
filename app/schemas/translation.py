@@ -29,6 +29,7 @@ class PipelineResult(BaseModel):
     synthesized_audio_size_bytes: Optional[int] = None
     watermarked: Optional[bool] = None
     watermark_method: Optional[str] = None
-    # Raw audio reaches the controller but never the JSON frame; the WS
-    # protocol sends it as a separate binary frame right after the JSON.
+    # Raw audio reaches the controller but never rides inside an event; the
+    # WS protocol sends it as its own binary frame, right after the
+    # `audio.delta` that announces its size.
     synthesized_audio: Optional[bytes] = Field(default=None, exclude=True)
