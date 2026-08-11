@@ -29,9 +29,8 @@ async def lifespan(app: FastAPI):
     init_engines()
     yield
     logger.info("Shutting down Speech-to-Speech Translation API")
-    # ponytail: no engine teardown while all three are stubs - there is
-    # nothing to release. CUDA/ONNX release lands with the real backend
-    # (fase-1-concurrencia.md C8).
+    # No engine teardown while all three are stubs - there is
+    # nothing to release. CUDA/ONNX release lands with the real backend.
     await engine.dispose()
 
 

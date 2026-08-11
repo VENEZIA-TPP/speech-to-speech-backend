@@ -43,7 +43,7 @@ def get_translation_repository(
 
 # AI services - built once by the lifespan (app/main.py), read from here.
 # Deliberately without a lock: a getter that never constructs has no
-# check-then-set to protect. See docs/investigacion/fase-1-concurrencia.md C3.
+# check-then-set to protect. 
 _asr_service: ASRService | None = None
 _mt_service: MTService | None = None
 _tts_service: TTSService | None = None
@@ -58,7 +58,7 @@ def init_engines() -> None:
     exception propagates out of the lifespan and the process refuses to
     start - instead of failing on some user's first request.
 
-    ponytail: runs synchronously inside an async lifespan. Harmless with
+    Runs synchronously inside an async lifespan. Harmless with
     stubs (two string assignments per engine), but real weights are
     30-90s of blocking CUDA/ONNX loading that stalls SIGTERM/startup
     probes. Upgrade path if that bites: wrap the call at the lifespan
