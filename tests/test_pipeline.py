@@ -399,7 +399,7 @@ def test_ws_pipeline_value_error_marks_session_failed(ws_client):
     from app.main import app
 
     class BrokenASRService(ASRService):
-        async def _transcribe(self, state, audio_bytes, language):
+        def _transcribe(self, state, audio_bytes, language):
             raise ValueError("boom")
 
     app.dependency_overrides[get_asr_service] = lambda: BrokenASRService("stub", "cpu")

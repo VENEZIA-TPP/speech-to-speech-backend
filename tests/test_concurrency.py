@@ -28,6 +28,7 @@ from app.pipeline.contracts import ASRState, MTState, TTSState
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
 from app.services.tts_service import TTSService
+from tests.test_pipeline import _read_segment
 
 # Largo comparado con el presupuesto de los 100 ms: si el loop quedara
 # congelado, la diferencia es de un orden de magnitud y no una carrera.
@@ -93,13 +94,18 @@ def test_event_loop_stays_responsive_during_inference(ws_client, stage):
         response = ws_client.get("/health/")
         elapsed = time.monotonic() - start
 
-        # Drenar la respuesta del pipeline (JSON + binario: las tres etapas
-        # stub siempre producen audio sintetizado) para que
-        # process_audio_chunk() termine su trabajo - incluida la escritura a
-        # la DB - mientras la conexion y la app siguen vivas, antes de que el
-        # cierre del `with` dispare el teardown.
+        # Drenar la respuesta del pipeline para que process_audio_chunk()
+        # termine su trabajo - incluida la escritura a la DB - mientras la
+        # conexion y la app siguen vivas, antes de que el cierre del `with`
+        # dispare el teardown.
+        #
+        # Se reusa el lector del test del protocolo en vez de contar frames a
+        # mano: este test no tiene nada que decir sobre cuantos eventos emite
+        # un segmento, y una copia local de esa cuenta se desincroniza en
+        # cuanto el protocolo cambia. Pasa por alto el `session.created` del
+        # handshake, que aca no interesa.
         ws.receive_json()
-        ws.receive_bytes()
+        _read_segment(ws)
         # Cerrar desde el cliente y esperar el close frame del propio
         # servidor, en vez de dejar que lo haga el teardown implicito del
         # `with`: ese teardown manda su propio close() seguido de un cancel()
