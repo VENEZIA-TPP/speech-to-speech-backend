@@ -41,9 +41,9 @@ class Settings(BaseSettings):
 
     # Voice activity detection
     # A segment is what the pipeline runs on, and the VAD decides where one
-    # ends. These are the starting point, not calibrated truth: they were
-    # picked against reasoning about the domain and verified against synthetic
-    # speech, never against a recorded human corpus.
+    # ends. All of these except the silence threshold are a starting point
+    # rather than calibrated truth: picked by reasoning about the domain and
+    # verified against synthesized speech, never against a human speaker.
     VAD_THRESHOLD: float = 0.5
     # The latency<->quality dial, and the one most worth re-measuring. Below
     # ~200 ms an intra-phrase breath is indistinguishable from the end of a
@@ -51,7 +51,12 @@ class Settings(BaseSettings):
     # conversational agent can afford to cut at 64 ms because it can speculatively
     # reopen a turn it cut wrongly; there is no such mechanism here, so there is
     # nothing to make an aggressive cut tolerable.
-    VAD_MIN_SILENCE_MS: int = 300
+    #
+    # 250 comes from measuring a real recording rather than from reasoning:
+    # sweeping 200/250/300/400/500 over one speaker showed 300 merging phrases
+    # that the speaker said separately. It is the one VAD parameter calibrated
+    # against a person - scripts/demo_vad.py --barrido is that experiment.
+    VAD_MIN_SILENCE_MS: int = 250
     # Filters noise bursts. Measured on frames that actually cleared the
     # hysteresis floor, not on segment length, so trailing silence cannot pad a
     # burst over the bar.
