@@ -1,17 +1,18 @@
 import time
-import anyio
-from anyio import CapacityLimiter
 from dataclasses import dataclass
 from typing import Optional
 
+import anyio
+from anyio import CapacityLimiter
+
 from app.pipeline.contracts import ASRState
 
-# Un token por etapa. Sin este limiter el despacho caeria en el pool de
-# threads por defecto - 40 tokens compartidos con las dependencias sincronas
-# del framework - y hasta 40 inferencias podrian salir en paralelo contra una
-# sola GPU. El limiter vive en el modulo, no en la instancia: el engine es un
-# dataclass congelado sin __dict__, y de todos modos hay exactamente un engine
-# por etapa por proceso, que es la misma cardinalidad.
+# One token per stage. Without this limiter the dispatch would land in the
+# default thread pool - 40 tokens, shared with the framework's own sync
+# dependencies - and up to 40 inferences could run in parallel against a
+# single GPU. The limiter lives on the module, not on the instance: the engine
+# is a frozen dataclass with no __dict__, and there is exactly one engine per
+# stage per process anyway, which is the same cardinality.
 _LIMITER = CapacityLimiter(1)
 
 
@@ -72,9 +73,9 @@ class ASRService:
         audio_bytes: bytes,
         language: Optional[str],
     ) -> tuple[str, Optional[str], Optional[float]]:
-        # Sincrono a proposito: es el punto de reemplazo por un modelo real, y
-        # la inferencia real bloquea. transcribe() lo despacha a un thread, asi
-        # que un `await` aca adentro no tendria loop donde correr.
+        # Synchronous on purpose: this is the replacement point for a real
+        # model, and real inference blocks. transcribe() dispatches it to a
+        # thread, so an `await` in here would have no loop to run on.
         # TODO: Internal transcription - replace with real inference. Buffer,
         # previous prompt and decoder cache go on `state`, never on self.
         # Stub doesn't need the audio bytes, so it doesn't buffer
