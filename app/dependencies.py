@@ -57,6 +57,13 @@ def init_engines() -> None:
     Called from the lifespan. If a backend cannot load its weights, the
     exception propagates out of the lifespan and the process refuses to
     start - instead of failing on some user's first request.
+
+    ponytail: runs synchronously inside an async lifespan. Harmless with
+    stubs (two string assignments per engine), but real weights are
+    30-90s of blocking CUDA/ONNX loading that stalls SIGTERM/startup
+    probes. Upgrade path if that bites: wrap the call at the lifespan
+    call site with `await anyio.to_thread.run_sync(init_engines)` -
+    fail-fast still holds, the exception still propagates out.
     """
     global _asr_service, _mt_service, _tts_service
     _asr_service = ASRService(model_name=settings.ASR_MODEL, device=settings.ASR_DEVICE)

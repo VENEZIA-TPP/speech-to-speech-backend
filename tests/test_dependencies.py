@@ -80,12 +80,21 @@ def test_engines_built_once(monkeypatch):
     monkeypatch.setattr(settings, "ASR_MODEL", "asr-x")
     monkeypatch.setattr(settings, "MT_MODEL", "mt-y")
     monkeypatch.setattr(settings, "TTS_MODEL", "tts-z")
+    # Distinct per-service devices too: ASR_DEVICE/MT_DEVICE/TTS_DEVICE all
+    # default to "cpu", so a mis-paired init_engines() (e.g. MT built with
+    # TTS_DEVICE) would pass the model_name-only assertions undetected.
+    monkeypatch.setattr(settings, "ASR_DEVICE", "dev-a")
+    monkeypatch.setattr(settings, "MT_DEVICE", "dev-b")
+    monkeypatch.setattr(settings, "TTS_DEVICE", "dev-c")
 
     with TestClient(app):
         assert calls == {"asr": 1, "mt": 1, "tts": 1}
         assert deps.get_asr_service().model_name == settings.ASR_MODEL
         assert deps.get_mt_service().model_name == settings.MT_MODEL
         assert deps.get_tts_service().model_name == settings.TTS_MODEL
+        assert deps.get_asr_service().device == settings.ASR_DEVICE
+        assert deps.get_mt_service().device == settings.MT_DEVICE
+        assert deps.get_tts_service().device == settings.TTS_DEVICE
 
         for getter in (
             deps.get_asr_service,
@@ -131,6 +140,8 @@ def test_startup_fails_fast_when_an_engine_cannot_be_built(monkeypatch):
 
     monkeypatch.setattr(deps, "TTSService", BrokenTTSService)
 
+    entered = False
     with pytest.raises(RuntimeError, match="weights missing"):
         with TestClient(app):
-            pass  # pragma: no cover - the lifespan never gets here
+            entered = True
+    assert not entered, "startup must fail before the app body runs"
