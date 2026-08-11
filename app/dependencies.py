@@ -43,7 +43,7 @@ def get_translation_repository(
 
 # AI services - built once by the lifespan (app/main.py), read from here.
 # Deliberately without a lock: a getter that never constructs has no
-# check-then-set to protect. 
+# check-then-set to protect.
 _asr_service: ASRService | None = None
 _mt_service: MTService | None = None
 _tts_service: TTSService | None = None
