@@ -92,6 +92,15 @@ async def pipeline_websocket(
 
             # Control message: a JSON object with a `type`.
             if "text" in data:
+                # Same cap as the binary path, checked before any parsing:
+                # binary frames never reached json.loads unbounded, and a text
+                # frame must not either - uvicorn's own default is far larger.
+                if len(data["text"]) > settings.MAX_AUDIO_FRAME_BYTES:
+                    with contextlib.suppress(Exception):
+                        await pipeline_service.complete_session(session_id)
+                    status_decided = True
+                    await websocket.close(code=1009)  # RFC 6455: message too big
+                    break
                 try:
                     event_type = json.loads(data["text"])["type"]
                 except (json.JSONDecodeError, TypeError, KeyError):
@@ -219,12 +228,16 @@ async def pipeline_websocket(
                         ),
                     )
                     await websocket.send_bytes(result.synthesized_audio)
+                # A segment with no audio frame gets no watermark claim either -
+                # nothing was applied to nothing. audio.done still closes the
+                # segment either way.
+                has_audio = bool(result.synthesized_audio)
                 await _send(
                     websocket,
                     AudioDone(
                         segment_index=index,
-                        watermarked=bool(result.watermarked),
-                        watermark_method=result.watermark_method,
+                        watermarked=has_audio and bool(result.watermarked),
+                        watermark_method=result.watermark_method if has_audio else None,
                     ),
                 )
                 await _send(

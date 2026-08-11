@@ -275,6 +275,66 @@ def test_ws_invalid_control_frame_does_not_kill_stream(ws_client):
         segment = _read_segment(ws)
         assert segment["audio.done"]["watermarked"] is True
 
+        # Drive the session to a decided terminal status before the `with`
+        # block exits: complete_session() writes before session.completed is
+        # sent, so reading that event is a genuine sync point, unlike letting
+        # the harness's own teardown race the connection closed.
+        ws.send_text(json.dumps({"type": "input_audio.commit"}))
+        assert ws.receive_json()["type"] == "session.completed"
+
+
+def test_ws_audio_done_no_watermark_claim_without_audio(ws_client):
+    """A segment with no audio must not claim a watermark either.
+
+    TTSResult.audio is normally a WatermarkedAudio, whose __post_init__
+    rejects empty data - the stub can never produce this case by itself.
+    This overrides synthesize() (not just the _synthesize()/_apply_watermark()
+    hooks that type guarantee runs through) with a fake audio object to
+    simulate what a TTS backend returning nothing would otherwise let slip
+    through as an unearned watermark claim, and checks the controller does
+    not repeat that claim over the wire - audio.done still closes the
+    segment, but with no watermark and no binary frame behind it.
+    """
+    from app.dependencies import get_tts_service
+    from app.main import app
+    from app.services.tts_service import TTSResult
+
+    class _EmptyAudio:
+        data = b""
+        method = "stub-metadata-tag"
+
+    class SilentTTSService(TTSService):
+        async def synthesize(self, state, text, language):
+            return TTSResult(audio=_EmptyAudio(), processing_time_ms=0)
+
+    app.dependency_overrides[get_tts_service] = lambda: SilentTTSService("stub", "cpu")
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        ws.send_bytes(b"fake_audio_chunk")
+        segment = _read_segment(ws)
+
+        assert "audio.delta" not in segment
+        assert "audio" not in segment
+        assert segment["audio.done"] == {
+            "type": "audio.done",
+            "segment_index": 0,
+            "watermarked": False,
+            "watermark_method": None,
+        }
+
+        # Same sync reasoning as test_ws_invalid_control_frame_does_not_kill_stream:
+        # drive to a decided terminal status instead of letting the harness
+        # teardown race the still-unwritten completion status.
+        ws.send_text(json.dumps({"type": "input_audio.commit"}))
+        assert ws.receive_json()["type"] == "session.completed"
+
 
 def test_ws_unknown_session_is_rejected(ws_client):
     """Una sesión inexistente se rechaza en la autorización, antes del pipeline.
@@ -549,6 +609,7 @@ def test_ws_rejects_oversized_frame(ws_client):
     created = ws_client.post(
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     ).json()
+    headers = {"Authorization": f"Bearer {created['ws_token']}"}
 
     with ws_client.websocket_connect(
         f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
@@ -556,6 +617,41 @@ def test_ws_rejects_oversized_frame(ws_client):
         assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"\x00" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
         assert ws.receive()["code"] == 1009  # RFC 6455: message too big
+
+    # Regression guard for the status write ordering: this must land
+    # COMPLETED, not be left ACTIVE for the finally block to race against a
+    # concurrent shutdown.
+    assert (
+        ws_client.get(f"/sessions/{created['id']}", headers=headers).json()["status"]
+        == "completed"
+    )
+
+
+def test_ws_rejects_oversized_text_frame(ws_client):
+    """A text control frame has the same size cap as a binary chunk.
+
+    Unlike the old protocol, which only ever compared a text frame to a
+    constant, this one parses it as JSON - an unbounded text frame would
+    reach json.loads() bounded only by uvicorn's much larger default.
+    """
+    from app.core.config import settings
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+    headers = {"Authorization": f"Bearer {created['ws_token']}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        ws.send_text("x" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
+        assert ws.receive()["code"] == 1009  # RFC 6455: message too big
+
+    assert (
+        ws_client.get(f"/sessions/{created['id']}", headers=headers).json()["status"]
+        == "completed"
+    )
 
 
 def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck():
