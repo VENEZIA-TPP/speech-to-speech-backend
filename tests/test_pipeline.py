@@ -575,3 +575,53 @@ async def test_duplicate_chunk_index_rejected(db_session):
     # the fixture's drop_all fails and the error surfaces as a teardown cascade
     # in unrelated tests.
     await db_session.rollback()
+
+
+def test_ws_event_wire_shape():
+    """El `type` de cada evento es parte del contrato, no un detalle interno."""
+    from app.schemas.events import (
+        AudioDelta,
+        AudioDone,
+        ErrorEvent,
+        SegmentMetrics,
+        SessionCompleted,
+        SessionCreated,
+        TranscriptionCompleted,
+        TranslationCompleted,
+    )
+
+    assert SessionCreated(session_id=7).model_dump() == {
+        "type": "session.created",
+        "session_id": 7,
+    }
+    assert SessionCompleted(session_id=7, total_segments=2).model_dump() == {
+        "type": "session.completed",
+        "session_id": 7,
+        "total_segments": 2,
+    }
+    assert AudioDelta(segment_index=0, seq=0, size_bytes=44).model_dump() == {
+        "type": "audio.delta",
+        "segment_index": 0,
+        "seq": 0,
+        "size_bytes": 44,
+    }
+    assert ErrorEvent(code="invalid_event", message="boom").model_dump() == {
+        "type": "error",
+        "code": "invalid_event",
+        "message": "boom",
+        "segment_index": None,
+    }
+    assert [
+        e(segment_index=0, **kwargs).model_dump()["type"]
+        for e, kwargs in [
+            (TranscriptionCompleted, {"transcript": "hola"}),
+            (TranslationCompleted, {"text": "hi", "target_language": "en"}),
+            (AudioDone, {"watermarked": True}),
+            (SegmentMetrics, {}),
+        ]
+    ] == [
+        "transcription.completed",
+        "translation.completed",
+        "audio.done",
+        "segment.metrics",
+    ]
