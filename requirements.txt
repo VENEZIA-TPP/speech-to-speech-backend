@@ -10,6 +10,14 @@ asyncpg
 psycopg2-binary
 alembic
 
+# Voice activity detection
+# Silero VAD ships as ONNX weights vendored under app/pipeline/weights/, so the
+# only runtime dependency is the ONNX Runtime (~19 MB) plus numpy. The
+# silero-vad package on PyPI is NOT used: it hard-requires torch + torchaudio
+# (~1 GB) as base dependencies to serve a 1.3 MB model, with ONNX only as an
+# extra.
+onnxruntime
+
 # Config & validation
 pydantic
 pydantic-settings
