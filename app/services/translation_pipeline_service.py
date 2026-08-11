@@ -17,7 +17,7 @@ Flow per audio chunk:
 
 Per-session streaming state (buffer, previous prompt, decoder cache) travels in
 the SessionState the WebSocket handler builds at accept() time - never on an
-engine, which is frozen. See docs/adr/0003-workers-persistentes-y-estado-por-sesion.md.
+engine, which is frozen and shared process-wide across every session.
 """
 
 from app.models.translation_session import SessionStatus

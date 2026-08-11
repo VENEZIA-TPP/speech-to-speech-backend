@@ -142,12 +142,13 @@ async def pipeline_websocket(
                 # The end-to-end clock lives here and not in the pipeline: this
                 # is the only place that can see the persistence writes, the
                 # event serialization and the send itself. It starts where the
-                # handler first has the segment's audio in hand and stops at
-                # the first byte of synthesized audio actually written to the
-                # socket. What it cannot cover is how long the frame sat unread
-                # in the socket buffer - nothing in the ASGI interface reports
-                # when it arrived - so this measures the server's window, not
-                # the speaker's.
+                # handler first has the segment's audio in hand and stops once
+                # the segment's whole synthesized audio frame has been handed
+                # to the transport (send_bytes() returning only means uvicorn
+                # buffered it, not that the peer has it). What it cannot cover
+                # is how long the frame sat unread in the socket buffer -
+                # nothing in the ASGI interface reports when it arrived - so
+                # this measures the server's window, not the speaker's.
                 segment_start = time.monotonic()
                 if len(data["bytes"]) > settings.MAX_AUDIO_FRAME_BYTES:
                     # Status write happens-before the close signal, like every
@@ -229,8 +230,8 @@ async def pipeline_websocket(
                         target_language=result.target_language,
                     ),
                 )
-                # None for a segment that carried no audio: there is no first
-                # byte to stop the clock on, and a number covering some other
+                # None for a segment that carried no audio: there is no audio
+                # frame to stop the clock on, and a number covering some other
                 # boundary would not be the same measurement.
                 e2e_ms = None
                 if result.synthesized_audio:

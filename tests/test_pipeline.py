@@ -10,6 +10,7 @@ When real models are integrated:
 import hashlib
 import io
 import json
+import time
 import wave
 
 import anyio
@@ -326,6 +327,10 @@ def test_ws_audio_done_no_watermark_claim_without_audio(ws_client):
             "watermarked": False,
             "watermark_method": None,
         }
+        # Solo esta prueba llega a la rama "sin audio" de e2e_ms: el pipeline
+        # real no la puede producir (WatermarkedAudio.__post_init__ rechaza
+        # data vacio), asi que no amerita un test aparte.
+        assert segment["segment.metrics"]["e2e_ms"] is None
 
         # Same sync reasoning as test_ws_invalid_control_frame_does_not_kill_stream:
         # drive to a decided terminal status instead of letting the harness
@@ -851,18 +856,31 @@ def test_ws_event_wire_shape():
 def test_metrics_cover_full_window(ws_client, monkeypatch):
     """e2e_ms cubre la ventana entera del segmento, no solo el pipeline.
 
-    La asercion obvia -- e2e_ms >= asr+mt+tts -- no prueba nada por si sola:
-    el numero viejo se medía adentro de process_audio_chunk(), que ya envuelve
-    a las tres etapas, asi que pasaba igual antes del cambio. Lo que discrimina
-    es meter demora en la parte de la ventana que solo cubre la medicion nueva:
-    entre el return del pipeline y el send_bytes del audio. Con _send() dormido,
-    tres envios caen adentro del reloj (transcription.completed,
-    translation.completed y el audio.delta que anuncia el binario); con la
-    medicion vieja el reloj ya habia cortado antes de los tres y e2e_ms se
-    quedaba en un digito de milisegundos.
+    Dos aserciones, cada una fija un extremo de la ventana:
+
+    - `e2e_ms >= stages` fija la cabeza (el arranque del reloj). Por si sola
+      no discrimina nada con etapas stub de ~0ms: pasaria igual aunque el
+      reloj arrancara mucho mas tarde de lo debido. Por eso la etapa TTS acá
+      duerme 0.1s -- muy por encima de los 3*delay_s que suman los envios
+      demorados --, asi que si el reloj arrancara despues del return de
+      process_audio_chunk() (excluyendo las dos escrituras a DB y las tres
+      etapas), e2e_ms rondaria solo los envios demorados y quedaria por
+      debajo de stages.
+    - `e2e_ms >= stages + 2 * delay_ms` fija la cola (el final del reloj).
+      Con _send() dormido, tres envios caen adentro (transcription.completed,
+      translation.completed y el audio.delta que anuncia el binario); se
+      exigen dos para no atarse a la precision del timer del loop. El
+      `stages` en la cuenta es lo que la distingue de una comparacion contra
+      una constante: una vez que hay una etapa lenta en el medio, una cola
+      medida sola (`e2e_ms >= 2 * delay_ms`) ya no alcanza para detectar que
+      el reloj se haya quedado adentro de process_audio_chunk() -- la etapa
+      lenta por si sola ya supera ese umbral. Sumando `stages` la cuenta pide
+      que la ventana cubra las dos cosas a la vez: el trabajo del pipeline Y
+      los envios que lo siguen.
     """
-    delay_s = 0.04
+    delay_s = 0.02
     delay_ms = int(delay_s * 1000)
+    tts_sleep_s = 0.1
     original_send = pipeline_controller._send
 
     async def slow_send(websocket, event):
@@ -870,6 +888,16 @@ def test_metrics_cover_full_window(ws_client, monkeypatch):
         await original_send(websocket, event)
 
     monkeypatch.setattr(pipeline_controller, "_send", slow_send)
+
+    from app.dependencies import get_tts_service
+    from app.main import app
+
+    class SlowTTSService(TTSService):
+        def _synthesize(self, state, text, language):
+            time.sleep(tts_sleep_s)
+            return super()._synthesize(state, text, language)
+
+    app.dependency_overrides[get_tts_service] = lambda: SlowTTSService("stub", "cpu")
 
     created = ws_client.post(
         "/sessions/", json={"source_language": "en", "target_language": "es"}
@@ -895,7 +923,4 @@ def test_metrics_cover_full_window(ws_client, monkeypatch):
     metrics = segment["segment.metrics"]
     stages = metrics["asr_ms"] + metrics["mt_ms"] + metrics["tts_ms"]
     assert metrics["e2e_ms"] >= stages
-    # Tres _send() demorados caen adentro de la ventana; se exigen dos para no
-    # atarse a la precision del timer del loop. Con la medicion vieja e2e_ms
-    # era de un digito, asi que dos ya discrimina de sobra.
-    assert metrics["e2e_ms"] >= 2 * delay_ms
+    assert metrics["e2e_ms"] >= stages + 2 * delay_ms
