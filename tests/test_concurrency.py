@@ -90,6 +90,15 @@ def test_event_loop_stays_responsive_during_inference(ws_client, stage):
         # cierre del `with` dispare el teardown.
         ws.receive_json()
         ws.receive_bytes()
+        # Cerrar desde el cliente y esperar el close frame del propio
+        # servidor, en vez de dejar que lo haga el teardown implicito del
+        # `with`: ese teardown manda su propio close() seguido de un cancel()
+        # casi inmediato, sin esperar a que el handler termine su `finally`
+        # (complete_session() + cierre de la AsyncSession de la request). Sin
+        # esto la cancelacion puede pisar esa sesion a mitad de cierre, mismo
+        # patron que test_ws_abrupt_disconnect_does_not_leave_session_active.
+        ws.close()
+        assert ws.receive()["type"] == "websocket.close"
 
     assert response.status_code == 200
     assert elapsed < RESPONSIVE_BUDGET_SECONDS, (
