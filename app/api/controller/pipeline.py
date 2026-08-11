@@ -1,5 +1,6 @@
 import contextlib
 import json
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel
@@ -138,6 +139,16 @@ async def pipeline_websocket(
 
             # Audio chunk (binary)
             if "bytes" in data:
+                # The end-to-end clock lives here and not in the pipeline: this
+                # is the only place that can see the persistence writes, the
+                # event serialization and the send itself. It starts where the
+                # handler first has the segment's audio in hand and stops at
+                # the first byte of synthesized audio actually written to the
+                # socket. What it cannot cover is how long the frame sat unread
+                # in the socket buffer - nothing in the ASGI interface reports
+                # when it arrived - so this measures the server's window, not
+                # the speaker's.
+                segment_start = time.monotonic()
                 if len(data["bytes"]) > settings.MAX_AUDIO_FRAME_BYTES:
                     # Status write happens-before the close signal, like every
                     # other terminal path below - a client that has observed
@@ -218,6 +229,10 @@ async def pipeline_websocket(
                         target_language=result.target_language,
                     ),
                 )
+                # None for a segment that carried no audio: there is no first
+                # byte to stop the clock on, and a number covering some other
+                # boundary would not be the same measurement.
+                e2e_ms = None
                 if result.synthesized_audio:
                     await _send(
                         websocket,
@@ -228,6 +243,7 @@ async def pipeline_websocket(
                         ),
                     )
                     await websocket.send_bytes(result.synthesized_audio)
+                    e2e_ms = int((time.monotonic() - segment_start) * 1000)
                 # A segment with no audio frame gets no watermark claim either -
                 # nothing was applied to nothing. audio.done still closes the
                 # segment either way.
@@ -247,7 +263,7 @@ async def pipeline_websocket(
                         asr_ms=result.asr_processing_time_ms,
                         mt_ms=result.mt_processing_time_ms,
                         tts_ms=result.tts_processing_time_ms,
-                        e2e_ms=result.total_processing_time_ms,
+                        e2e_ms=e2e_ms,
                     ),
                 )
 

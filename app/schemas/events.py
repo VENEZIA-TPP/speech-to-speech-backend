@@ -55,9 +55,22 @@ class AudioDone(BaseModel):
 
 
 class SegmentMetrics(BaseModel):
-    """Per-stage timings. Named after what is actually measured: the TTS
-    figure is the full synthesis time, not a time-to-first-byte, because the
-    synthesis is not streamed yet."""
+    """Per-stage timings, named after what is actually measured.
+
+    `e2e_ms` covers the whole server-side window for the segment: from the
+    moment the handler has the audio in hand to the moment the first byte of
+    synthesized audio is written to the socket. It includes the persistence
+    writes, the serialization of the events that precede the audio, and the
+    send itself, so it is always >= asr_ms + mt_ms + tts_ms. Two things it
+    deliberately does not cover: how long the frame sat unread in the socket
+    buffer (the ASGI interface never reports when it arrived, so the clock
+    starts at "the server has the audio", not at "the speaker stopped
+    talking"), and the events that follow the audio frame. It is None for a
+    segment that carried no audio, since there is no first byte to stop it on.
+
+    The TTS figure is the full synthesis time, not a time-to-first-byte,
+    because the synthesis is not streamed yet.
+    """
 
     type: Literal["segment.metrics"] = "segment.metrics"
     segment_index: int

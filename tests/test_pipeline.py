@@ -12,9 +12,11 @@ import io
 import json
 import wave
 
+import anyio
 import pytest
 from httpx import AsyncClient
 
+from app.api.controller import pipeline as pipeline_controller
 from app.pipeline.contracts import ASRState, MTState, SessionState, TTSState
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
@@ -848,3 +850,56 @@ def test_ws_event_wire_shape():
         "audio.done",
         "segment.metrics",
     ]
+
+
+def test_metrics_cover_full_window(ws_client, monkeypatch):
+    """e2e_ms cubre la ventana entera del segmento, no solo el pipeline.
+
+    La asercion obvia -- e2e_ms >= asr+mt+tts -- no prueba nada por si sola:
+    el numero viejo se medía adentro de process_audio_chunk(), que ya envuelve
+    a las tres etapas, asi que pasaba igual antes del cambio. Lo que discrimina
+    es meter demora en la parte de la ventana que solo cubre la medicion nueva:
+    entre el return del pipeline y el send_bytes del audio. Con _send() dormido,
+    tres envios caen adentro del reloj (transcription.completed,
+    translation.completed y el audio.delta que anuncia el binario); con la
+    medicion vieja el reloj ya habia cortado antes de los tres y e2e_ms se
+    quedaba en un digito de milisegundos.
+    """
+    delay_s = 0.04
+    delay_ms = int(delay_s * 1000)
+    original_send = pipeline_controller._send
+
+    async def slow_send(websocket, event):
+        await anyio.sleep(delay_s)
+        await original_send(websocket, event)
+
+    monkeypatch.setattr(pipeline_controller, "_send", slow_send)
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+
+        ws.send_bytes(b"fake_audio_chunk")
+        segment = _read_segment(ws)
+
+        # Cierre desde el cliente y espera del close del servidor: el with no
+        # sirve para eso, manda su propio close seguido de un cancel casi
+        # inmediato.
+        ws.close()
+        assert ws.receive()["type"] == "websocket.close"
+
+    metrics = segment["segment.metrics"]
+    stages = metrics["asr_ms"] + metrics["mt_ms"] + metrics["tts_ms"]
+    assert metrics["e2e_ms"] >= stages
+    # Tres _send() demorados caen adentro de la ventana; se exigen dos para no
+    # atarse a la precision del timer del loop. Con la medicion vieja e2e_ms
+    # era de un digito, asi que dos ya discrimina de sobra.
+    assert metrics["e2e_ms"] >= 2 * delay_ms
