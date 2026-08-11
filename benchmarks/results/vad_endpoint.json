@@ -1,0 +1,135 @@
+{
+  "measured_at": "2026-08-11T20:58:58+00:00",
+  "what": "Silero VAD segmentation on CPU",
+  "evidence": "CPU-bound in production too, so these timings transfer. Speech is text-to-speech, so this says nothing about WER or BLEU.",
+  "machine": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "settings": {
+    "threshold": 0.5,
+    "min_silence_ms": 300,
+    "min_speech_ms": 384,
+    "speech_pad_ms": 300,
+    "max_speech_ms": 8000,
+    "sample_rate": 16000
+  },
+  "audio": {
+    "file": "tests/fixtures/es_sistema.wav",
+    "duration_ms": 1824
+  },
+  "frame_cost": {
+    "frame_ms": 32.0,
+    "warmup_ms": 4.41,
+    "samples": 1000,
+    "mean_ms": 0.0684,
+    "p50_ms": 0.0677,
+    "p95_ms": 0.0722,
+    "max_ms": 0.1206,
+    "per_chunk_ms": 6.416,
+    "chunk_duration_ms": 3000,
+    "real_time_factor": 0.002139
+  },
+  "endpoint": [
+    {
+      "gap_ms": 0,
+      "segments": 1,
+      "split": false,
+      "segment_ms": [
+        3968
+      ],
+      "vad_pass_ms": 9.825
+    },
+    {
+      "gap_ms": 100,
+      "segments": 1,
+      "split": false,
+      "segment_ms": [
+        4096
+      ],
+      "vad_pass_ms": 9.992
+    },
+    {
+      "gap_ms": 200,
+      "segments": 1,
+      "split": false,
+      "segment_ms": [
+        4256
+      ],
+      "vad_pass_ms": 10.163
+    },
+    {
+      "gap_ms": 250,
+      "segments": 1,
+      "split": false,
+      "segment_ms": [
+        4288
+      ],
+      "vad_pass_ms": 10.246
+    },
+    {
+      "gap_ms": 300,
+      "segments": 2,
+      "split": true,
+      "segment_ms": [
+        2144,
+        2240
+      ],
+      "vad_pass_ms": 10.376
+    },
+    {
+      "gap_ms": 400,
+      "segments": 2,
+      "split": true,
+      "segment_ms": [
+        2144,
+        2336
+      ],
+      "vad_pass_ms": 10.593
+    },
+    {
+      "gap_ms": 500,
+      "segments": 2,
+      "split": true,
+      "segment_ms": [
+        2144,
+        2464
+      ],
+      "vad_pass_ms": 10.815
+    },
+    {
+      "gap_ms": 800,
+      "segments": 2,
+      "split": true,
+      "segment_ms": [
+        2144,
+        2400
+      ],
+      "vad_pass_ms": 11.43
+    },
+    {
+      "gap_ms": 1200,
+      "segments": 2,
+      "split": true,
+      "segment_ms": [
+        2144,
+        2464
+      ],
+      "vad_pass_ms": 12.257
+    }
+  ],
+  "ceiling": {
+    "spoken_ms": 10944,
+    "segments": 2,
+    "segment_ms": [
+      7680,
+      3584
+    ],
+    "reasons": [
+      "ceiling",
+      "silence"
+    ],
+    "max_speech_ms": 8000
+  }
+}
