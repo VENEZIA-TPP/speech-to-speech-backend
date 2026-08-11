@@ -83,6 +83,14 @@ def test_event_loop_stays_responsive_during_inference(ws_client, stage):
         response = ws_client.get("/health/")
         elapsed = time.monotonic() - start
 
+        # Drenar la respuesta del pipeline (JSON + binario: las tres etapas
+        # stub siempre producen audio sintetizado) para que
+        # process_audio_chunk() termine su trabajo - incluida la escritura a
+        # la DB - mientras la conexion y la app siguen vivas, antes de que el
+        # cierre del `with` dispare el teardown.
+        ws.receive_json()
+        ws.receive_bytes()
+
     assert response.status_code == 200
     assert elapsed < RESPONSIVE_BUDGET_SECONDS, (
         f"GET /health/ tardo {elapsed:.3f}s con una inferencia de "
