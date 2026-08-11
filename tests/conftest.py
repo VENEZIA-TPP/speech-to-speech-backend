@@ -1,3 +1,7 @@
+import io
+import wave
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -59,6 +63,41 @@ async def client(db_session):
         yield ac
 
     app.dependency_overrides.clear()
+
+
+_FIXTURE_WAV = Path(__file__).parent / "fixtures" / "es_sistema.wav"
+
+
+def speech_chunk(trailing_silence_ms: int = 600) -> bytes:
+    """One chunk of real speech that closes exactly one segment.
+
+    Tests used to send b"fake_audio_chunk", which worked while every chunk
+    produced a segment regardless of its content. The pipeline now runs on what
+    the VAD decides is speech, and the VAD does not fire on synthetic audio -
+    tones and noise score below 0.03 against a threshold of 0.5 - so a chunk
+    that is not real speech produces no segment and nothing to assert on.
+
+    The trailing silence is what closes the segment: without it the speech is
+    still open when the test reads, and only the end-of-session flush would
+    emit it. It defaults to comfortably more than VAD_MIN_SILENCE_MS.
+    """
+    with wave.open(str(_FIXTURE_WAV), "rb") as source:
+        frames = source.readframes(source.getnframes())
+        rate = source.getframerate()
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(frames)
+        out.writeframes(b"\x00\x00" * int(rate * trailing_silence_ms / 1000))
+    return buffer.getvalue()
+
+
+@pytest.fixture(scope="session")
+def speech() -> bytes:
+    return speech_chunk()
 
 
 async def _run_ddl(fn):

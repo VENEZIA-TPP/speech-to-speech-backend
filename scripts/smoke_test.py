@@ -1,11 +1,16 @@
 """End-to-end smoke test against a running server (real Postgres, stub models).
 
-Creates a session over REST, streams synthetic WAV chunks over the WebSocket,
-and reads back the typed event stream: a transcription, a translation, a
-watermarked audio frame and its metrics per segment. Sends every chunk before
-reading any reply, because the protocol promises neither one segment per chunk
-nor a reply before the next send. Complements tests/ (which runs in-process
-against SQLite) by exercising the real server, the real DB and a real WS client.
+Creates a session over REST, streams WAV chunks over the WebSocket, and reads
+back the typed event stream: a transcription, a translation, a watermarked audio
+frame and its metrics per segment. Sends every chunk before reading any reply,
+because the protocol promises neither one segment per chunk nor a reply before
+the next send. Complements tests/ (which runs in-process against SQLite) by
+exercising the real server, the real DB and a real WS client.
+
+It sends recorded speech rather than generated silence. The pipeline runs on
+what the voice segmenter decides is speech, and the segmenter does not fire on
+synthetic audio, so a run made of silence would now complete with zero segments
+and assert nothing at all - passing while exercising none of the pipeline.
 
 Usage (server must already be running):
     .venv/bin/python scripts/smoke_test.py
@@ -19,6 +24,7 @@ import json
 import os
 import urllib.request
 import wave
+from pathlib import Path
 
 import websockets
 
@@ -26,17 +32,27 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8000")
 CHUNKS = int(os.environ.get("CHUNKS", "2"))
 
 SAMPLE_RATE = 16000
-CHUNK_DURATION_S = 2
+# Enough silence after the speech to take the segmenter past its endpoint
+# threshold, so each chunk closes its own segment instead of leaving one open
+# for the end-of-session flush.
+TRAILING_SILENCE_S = 0.6
+SPEECH_WAV = (
+    Path(__file__).resolve().parent.parent / "tests" / "fixtures" / ("es_sistema.wav")
+)
 
 
 def make_wav() -> bytes:
-    """Synthetic 16 kHz mono pcm_s16le silence - the format the pipeline expects."""
+    """One chunk: recorded speech plus enough trailing silence to close it."""
+    with wave.open(str(SPEECH_WAV), "rb") as source:
+        frames = source.readframes(source.getnframes())
+
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(SAMPLE_RATE)
-        wav.writeframes(b"\x00\x00" * (SAMPLE_RATE * CHUNK_DURATION_S))
+        wav.writeframes(frames)
+        wav.writeframes(b"\x00\x00" * int(SAMPLE_RATE * TRAILING_SILENCE_S))
     return buffer.getvalue()
 
 
@@ -105,6 +121,10 @@ async def stream(session_id: int, token: str, audio: bytes) -> None:
                 print(f"         {event['e2e_ms']} ms total")
             elif event["type"] == "session.completed":
                 assert event["total_segments"] == len(segments), (event, segments)
+                # A run that produced nothing is a failed run, not a quiet one:
+                # every assertion above lives inside a branch that only fires
+                # when a segment comes back.
+                assert segments, "no segment came back: the VAD found no speech"
                 print(
                     f"session {session_id} completed, "
                     f"{event['total_segments']} segments"
