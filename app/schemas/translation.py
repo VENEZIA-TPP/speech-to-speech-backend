@@ -32,3 +32,11 @@ class PipelineResult(BaseModel):
     # WS protocol sends it as its own binary frame, right after the
     # `audio.delta` that announces its size.
     synthesized_audio: Optional[bytes] = Field(default=None, exclude=True)
+    # The instant the segmenter closed this segment, on the monotonic clock.
+    # A timestamp, deliberately not a duration: the end-to-end figure is
+    # subtracted in the WebSocket handler, which is the only place that can see
+    # the persistence writes, the event serialization and the send. A duration
+    # computed here would be measuring the pipeline and calling it end-to-end.
+    # It rides with the segment rather than with the frame that carried it,
+    # because one frame can close zero, one or several segments.
+    segment_started_at: float = Field(default=0.0, exclude=True)
