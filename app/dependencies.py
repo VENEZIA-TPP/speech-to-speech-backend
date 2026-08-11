@@ -41,34 +41,44 @@ def get_translation_repository(
     return SQLAlchemyTranslationRepository(db)
 
 
-# AI services - singletons (loaded once at startup)
+# AI services - built once by the lifespan (app/main.py), read from here.
+# Deliberately without a lock: a getter that never constructs has no
+# check-then-set to protect. See docs/investigacion/fase-1-concurrencia.md C3.
 _asr_service: ASRService | None = None
 _mt_service: MTService | None = None
 _tts_service: TTSService | None = None
 
+_NOT_BUILT = "engines not built: the lifespan did not run"
+
+
+def init_engines() -> None:
+    """Build the three engines once, at startup, before any traffic.
+
+    Called from the lifespan. If a backend cannot load its weights, the
+    exception propagates out of the lifespan and the process refuses to
+    start - instead of failing on some user's first request.
+    """
+    global _asr_service, _mt_service, _tts_service
+    _asr_service = ASRService(model_name=settings.ASR_MODEL, device=settings.ASR_DEVICE)
+    _mt_service = MTService(model_name=settings.MT_MODEL, device=settings.MT_DEVICE)
+    _tts_service = TTSService(model_name=settings.TTS_MODEL, device=settings.TTS_DEVICE)
+
 
 def get_asr_service() -> ASRService:
-    global _asr_service
     if _asr_service is None:
-        _asr_service = ASRService(
-            model_name=settings.ASR_MODEL, device=settings.ASR_DEVICE
-        )
+        raise RuntimeError(_NOT_BUILT)
     return _asr_service
 
 
 def get_mt_service() -> MTService:
-    global _mt_service
     if _mt_service is None:
-        _mt_service = MTService(model_name=settings.MT_MODEL, device=settings.MT_DEVICE)
+        raise RuntimeError(_NOT_BUILT)
     return _mt_service
 
 
 def get_tts_service() -> TTSService:
-    global _tts_service
     if _tts_service is None:
-        _tts_service = TTSService(
-            model_name=settings.TTS_MODEL, device=settings.TTS_DEVICE
-        )
+        raise RuntimeError(_NOT_BUILT)
     return _tts_service
 
 
