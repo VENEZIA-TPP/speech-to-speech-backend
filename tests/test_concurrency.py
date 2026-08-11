@@ -5,9 +5,8 @@ inferencia que corre inline sobre ese loop no congela a la sesion que la
 disparo: congela a todas. Marcar el metodo como `async def` no cambia nada -
 sin un `await` real adentro, el control nunca vuelve al loop.
 
-Estos tests inyectan un backend que bloquea a proposito. Contra un pipeline
-que ejecuta la inferencia inline fallan; contra uno que la despacha a un
-thread pasan.
+Estos tests inyectan un backend que bloquea a proposito: contra un pipeline
+que ejecuta la inferencia inline el GET tarda lo mismo que la inferencia.
 """
 
 import asyncio
@@ -30,22 +29,22 @@ def _blocking_engines(entered: threading.Event):
     """Un backend bloqueante por etapa, con la firma que tiene hoy el hook."""
 
     class BlockingASRService(ASRService):
-        async def _transcribe(self, state, audio_bytes, language):
+        def _transcribe(self, state, audio_bytes, language):
             entered.set()
             time.sleep(BLOCKING_SECONDS)
             return ("blocked", language or "en", 1.0)
 
     class BlockingMTService(MTService):
-        async def _translate(self, state, text, source_language, target_language):
+        def _translate(self, state, text, source_language, target_language):
             entered.set()
             time.sleep(BLOCKING_SECONDS)
             return "blocked"
 
     class BlockingTTSService(TTSService):
-        async def _synthesize(self, state, text, language):
+        def _synthesize(self, state, text, language):
             entered.set()
             time.sleep(BLOCKING_SECONDS)
-            return await TTSService._synthesize(self, state, text, language)
+            return TTSService._synthesize(self, state, text, language)
 
     return {
         "asr": BlockingASRService,
