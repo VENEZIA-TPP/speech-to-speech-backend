@@ -219,7 +219,7 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
     from app.main import app
 
     class BrokenTTSService(TTSService):
-        async def _synthesize(self, state, text, language):
+        def _synthesize(self, state, text, language):
             raise RuntimeError("boom")
 
     app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService("stub", "cpu")
@@ -337,7 +337,7 @@ def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
     from app.main import app
 
     class BrokenTTSService(TTSService):
-        async def _synthesize(self, state, text, language):
+        def _synthesize(self, state, text, language):
             raise RuntimeError("boom")
 
     app.dependency_overrides[get_tts_service] = lambda: BrokenTTSService("stub", "cpu")

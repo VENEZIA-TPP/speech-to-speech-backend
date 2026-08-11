@@ -2,7 +2,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from anyio import CapacityLimiter, to_thread
+
 from app.pipeline.contracts import ASRState
+
+# One token per stage: inference must not land in the framework's default
+# thread pool (40 tokens, shared with its sync dependencies), where 40
+# inferences could run at once against a single GPU. Module level because the
+# engine is a frozen dataclass with no __dict__, and there is one engine per
+# stage per process anyway.
+_LIMITER = CapacityLimiter(1)
 
 
 @dataclass
@@ -44,8 +53,8 @@ class ASRService:
         # integrates a real streaming ASR where per-session memory belongs
         # (ADR 0003, barrier #2). The engine is frozen; self is not an option.
         start = time.monotonic()
-        text, detected_language, confidence = await self._transcribe(
-            state, audio_bytes, source_language
+        text, detected_language, confidence = await to_thread.run_sync(
+            self._transcribe, state, audio_bytes, source_language, limiter=_LIMITER
         )
         processing_time_ms = int((time.monotonic() - start) * 1000)
 
@@ -56,12 +65,17 @@ class ASRService:
             processing_time_ms=processing_time_ms,
         )
 
-    async def _transcribe(
+    def _transcribe(
         self,
         state: ASRState,
         audio_bytes: bytes,
         language: Optional[str],
     ) -> tuple[str, Optional[str], Optional[float]]:
+        # Synchronous on purpose: this is the replacement point for a real
+        # model, and real inference blocks. transcribe() dispatches it to a
+        # thread. Writing it as `async def` is the trap: run_sync would hand
+        # back a coroutine it never runs, so the inference would silently
+        # never happen.
         # TODO: Internal transcription - replace with real inference. Buffer,
         # previous prompt and decoder cache go on `state`, never on self.
         # Stub doesn't need the audio bytes, so it doesn't buffer

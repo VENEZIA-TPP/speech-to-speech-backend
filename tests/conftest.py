@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -13,7 +11,7 @@ from app.db.session import get_session
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
-# StaticPool 
+# StaticPool
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
     echo=False,
@@ -21,7 +19,9 @@ test_engine = create_async_engine(
     poolclass=StaticPool,
 )
 
-TestSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+TestSessionLocal = async_sessionmaker(
+    test_engine, expire_on_commit=False, class_=AsyncSession
+)
 
 
 async def override_get_session():
@@ -33,6 +33,7 @@ async def override_get_session():
 def cleanup_engine():
     yield
     import asyncio
+
     asyncio.run(test_engine.dispose())
 
 
@@ -52,7 +53,9 @@ async def db_session():
 async def client(db_session):
     app.dependency_overrides[get_session] = override_get_session
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()
@@ -66,11 +69,27 @@ async def _run_ddl(fn):
 @pytest.fixture(scope="function")
 def ws_client():
     """Sync TestClient for WebSocket tests (httpx AsyncClient can't speak WS)."""
-    asyncio.run(_run_ddl(Base.metadata.create_all))
     app.dependency_overrides[get_session] = override_get_session
 
-    with TestClient(app) as tc:
-        yield tc
-
-    app.dependency_overrides.clear()
-    asyncio.run(_run_ddl(Base.metadata.drop_all))
+    try:
+        with TestClient(app) as tc:
+            # El DDL corre en el portal del TestClient, no en un asyncio.run()
+            # aparte: un asyncio.run() abre y cierra su propio loop, y create_all/
+            # drop_all terminaban pisando la conexion que el handler de WS seguia
+            # usando en el loop del TestClient - de ahi el "no active connection"
+            # intermitente. Con tc.portal.call() todo el DDL y todo el trafico de
+            # la sesion viven en el mismo loop.
+            tc.portal.call(_run_ddl, Base.metadata.create_all)
+            try:
+                yield tc
+            finally:
+                tc.portal.call(_run_ddl, Base.metadata.drop_all)
+                # Belt and braces: dejar el engine sin conexion cacheada para que el
+                # proximo test arranque un checkout limpio. No es lo que arregla el
+                # "no active connection" intermitente - eso lo arreglan el DDL sobre
+                # el portal y el cierre explicito del WS del lado del cliente - pero
+                # tampoco cuesta nada y acota el estado que un test le deja al
+                # siguiente.
+                tc.portal.call(test_engine.dispose)
+    finally:
+        app.dependency_overrides.clear()
