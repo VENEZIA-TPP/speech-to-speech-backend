@@ -74,6 +74,12 @@ def test_engines_built_once(monkeypatch):
     the day someone puts construction back in a getter.
     """
     calls = _patch_counting_engines(monkeypatch)
+    # Distinct per-service values: with config.py's shared "stub" default,
+    # a mis-paired init_engines() (e.g. MT built with ASR_MODEL) would pass
+    # the model_name assertions below undetected.
+    monkeypatch.setattr(settings, "ASR_MODEL", "asr-x")
+    monkeypatch.setattr(settings, "MT_MODEL", "mt-y")
+    monkeypatch.setattr(settings, "TTS_MODEL", "tts-z")
 
     with TestClient(app):
         assert calls == {"asr": 1, "mt": 1, "tts": 1}
@@ -114,3 +120,17 @@ def test_getters_do_not_construct_without_lifespan(monkeypatch):
             assert "lifespan" in str(r)
 
     assert calls == {"asr": 0, "mt": 0, "tts": 0}
+
+
+def test_startup_fails_fast_when_an_engine_cannot_be_built(monkeypatch):
+    """Missing weights must kill the process at boot, not the first request."""
+
+    class BrokenTTSService(TTSService):
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("weights missing")
+
+    monkeypatch.setattr(deps, "TTSService", BrokenTTSService)
+
+    with pytest.raises(RuntimeError, match="weights missing"):
+        with TestClient(app):
+            pass  # pragma: no cover - the lifespan never gets here
