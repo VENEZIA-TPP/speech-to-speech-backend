@@ -1,0 +1,92 @@
+"""El event loop no puede congelarse mientras corre una inferencia.
+
+Las N conexiones WebSocket de un proceso comparten un unico event loop. Una
+inferencia que corre inline sobre ese loop no congela a la sesion que la
+disparo: congela a todas. Marcar el metodo como `async def` no cambia nada -
+sin un `await` real adentro, el control nunca vuelve al loop.
+
+Estos tests inyectan un backend que bloquea a proposito. Contra un pipeline
+que ejecuta la inferencia inline fallan; contra uno que la despacha a un
+thread pasan.
+"""
+
+import asyncio
+import threading
+import time
+
+import pytest
+
+from app.services.asr_service import ASRService
+from app.services.mt_service import MTService
+from app.services.tts_service import TTSService
+
+# Largo comparado con el presupuesto de los 100 ms: si el loop quedara
+# congelado, la diferencia es de un orden de magnitud y no una carrera.
+BLOCKING_SECONDS = 2.0
+RESPONSIVE_BUDGET_SECONDS = 0.1
+
+
+def _blocking_engines(entered: threading.Event):
+    """Un backend bloqueante por etapa, con la firma que tiene hoy el hook."""
+
+    class BlockingASRService(ASRService):
+        async def _transcribe(self, state, audio_bytes, language):
+            entered.set()
+            time.sleep(BLOCKING_SECONDS)
+            return ("blocked", language or "en", 1.0)
+
+    class BlockingMTService(MTService):
+        async def _translate(self, state, text, source_language, target_language):
+            entered.set()
+            time.sleep(BLOCKING_SECONDS)
+            return "blocked"
+
+    class BlockingTTSService(TTSService):
+        async def _synthesize(self, state, text, language):
+            entered.set()
+            time.sleep(BLOCKING_SECONDS)
+            return await TTSService._synthesize(self, state, text, language)
+
+    return {
+        "asr": BlockingASRService,
+        "mt": BlockingMTService,
+        "tts": BlockingTTSService,
+    }
+
+
+@pytest.mark.parametrize("stage", ["asr", "mt", "tts"])
+def test_event_loop_stays_responsive_during_inference(ws_client, stage):
+    """Con una inferencia de 2 s en vuelo, GET /health/ responde en <100 ms.
+
+    Esperar el threading.Event antes de cronometrar es lo que hace el test
+    determinista: sin eso el GET podria salir antes de que el servidor haya
+    empezado a procesar el chunk, y pasar por accidente.
+    """
+    from app.dependencies import get_asr_service, get_mt_service, get_tts_service
+    from app.main import app
+
+    getters = {"asr": get_asr_service, "mt": get_mt_service, "tts": get_tts_service}
+    entered = threading.Event()
+    engine_cls = _blocking_engines(entered)[stage]
+    app.dependency_overrides[getters[stage]] = lambda: engine_cls("stub", "cpu")
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        ws.send_bytes(b"fake_audio_chunk")
+        assert entered.wait(timeout=5.0), "la inferencia nunca arranco"
+
+        start = time.monotonic()
+        response = ws_client.get("/health/")
+        elapsed = time.monotonic() - start
+
+    assert response.status_code == 200
+    assert elapsed < RESPONSIVE_BUDGET_SECONDS, (
+        f"GET /health/ tardo {elapsed:.3f}s con una inferencia de "
+        f"{BLOCKING_SECONDS}s en vuelo en la etapa {stage}: el event loop "
+        f"quedo congelado para todas las conexiones del proceso"
+    )
