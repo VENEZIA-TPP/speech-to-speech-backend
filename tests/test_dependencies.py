@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import dependencies as deps
+from app.core.config import settings
 from app.main import app
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
@@ -24,9 +25,9 @@ def restore_engine_globals(monkeypatch):
 
     monkeypatch.setattr snapshots them and puts them back after each test.
     """
-    monkeypatch.setattr(deps, "_asr_service", deps._asr_service, raising=False)
-    monkeypatch.setattr(deps, "_mt_service", deps._mt_service, raising=False)
-    monkeypatch.setattr(deps, "_tts_service", deps._tts_service, raising=False)
+    monkeypatch.setattr(deps, "_asr_service", deps._asr_service)
+    monkeypatch.setattr(deps, "_mt_service", deps._mt_service)
+    monkeypatch.setattr(deps, "_tts_service", deps._tts_service)
 
 
 def _counting(cls, calls, key):
@@ -60,17 +61,25 @@ def _call_from_threads(fn):
         for f in futures:
             try:
                 out.append(f.result())
-            except Exception as exc:  # noqa: BLE001 - the test inspects the type
+            except Exception as exc:
                 out.append(exc)
         return out
 
 
 def test_engines_built_once(monkeypatch):
-    """One lifespan, N concurrent readers, one construction per engine."""
+    """One lifespan, N concurrent readers, one construction per engine.
+
+    The threads are the C3 scenario, not the assertion: today the getters
+    are pure reads, so this cannot race. It stays as the reproducer for
+    the day someone puts construction back in a getter.
+    """
     calls = _patch_counting_engines(monkeypatch)
 
     with TestClient(app):
         assert calls == {"asr": 1, "mt": 1, "tts": 1}
+        assert deps.get_asr_service().model_name == settings.ASR_MODEL
+        assert deps.get_mt_service().model_name == settings.MT_MODEL
+        assert deps.get_tts_service().model_name == settings.TTS_MODEL
 
         for getter in (
             deps.get_asr_service,
