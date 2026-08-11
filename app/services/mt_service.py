@@ -1,17 +1,15 @@
 import time
 from dataclasses import dataclass
 
-import anyio
-from anyio import CapacityLimiter
+from anyio import CapacityLimiter, to_thread
 
 from app.pipeline.contracts import MTState
 
-# One token per stage. Without this limiter the dispatch would land in the
-# default thread pool - 40 tokens, shared with the framework's own sync
-# dependencies - and up to 40 inferences could run in parallel against a
-# single GPU. The limiter lives on the module, not on the instance: the engine
-# is a frozen dataclass with no __dict__, and there is exactly one engine per
-# stage per process anyway, which is the same cardinality.
+# One token per stage: inference must not land in the framework's default
+# thread pool (40 tokens, shared with its sync dependencies), where 40
+# inferences could run at once against a single GPU. Module level because the
+# engine is a frozen dataclass with no __dict__, and there is one engine per
+# stage per process anyway.
 _LIMITER = CapacityLimiter(1)
 
 
@@ -43,7 +41,7 @@ class MTService:
     ) -> MTResult:
         # TODO: Translate text from source_language to target_language.
         start = time.monotonic()
-        translated = await anyio.to_thread.run_sync(
+        translated = await to_thread.run_sync(
             self._translate,
             state,
             text,
@@ -69,7 +67,9 @@ class MTService:
     ) -> str:
         # Synchronous on purpose: this is the replacement point for a real
         # model, and real inference blocks. translate() dispatches it to a
-        # thread, so an `await` in here would have no loop to run on.
+        # thread. Writing it as `async def` is the trap: run_sync would hand
+        # back a coroutine it never runs, so the inference would silently
+        # never happen.
         # TODO: Internal translation - replace with real inference. Per-session
         # context goes on `state`; the per-language-pair model cache belongs on
         # the engine and is read-only at runtime (ADR 0003).

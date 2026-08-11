@@ -3,20 +3,18 @@ import time
 import wave
 from dataclasses import dataclass
 
-import anyio
-from anyio import CapacityLimiter
+from anyio import CapacityLimiter, to_thread
 
 from app.pipeline.contracts import RawAudio, TTSState, WatermarkedAudio
 
 _STUB_SAMPLE_RATE = 16000
 _STUB_DURATION_MS = 300
 
-# One token per stage. Without this limiter the dispatch would land in the
-# default thread pool - 40 tokens, shared with the framework's own sync
-# dependencies - and up to 40 inferences could run in parallel against a
-# single GPU. The limiter lives on the module, not on the instance: the engine
-# is a frozen dataclass with no __dict__, and there is exactly one engine per
-# stage per process anyway, which is the same cardinality.
+# One token per stage: inference must not land in the framework's default
+# thread pool (40 tokens, shared with its sync dependencies), where 40
+# inferences could run at once against a single GPU. Module level because the
+# engine is a frozen dataclass with no __dict__, and there is one engine per
+# stage per process anyway.
 _LIMITER = CapacityLimiter(1)
 
 
@@ -49,18 +47,18 @@ class TTSService:
         # per session by the segmenter (PR 12). Passing the current audio chunk
         # as a speaker reference - the Fase 0 bug - is no longer expressible.
         start = time.monotonic()
-        raw = await anyio.to_thread.run_sync(
+        raw = await to_thread.run_sync(
             self._synthesize, state, text, language, limiter=_LIMITER
         )
+        # The watermark stays on the loop: today it only builds a dataclass. It
+        # moves into the thread alongside synthesis once the marking is done in
+        # the audio domain.
+        audio = self._apply_watermark(raw)
         # Rule #6, enforced by the type rather than by line order: _synthesize()
         # can only produce RawAudio, and only this hook produces the
         # WatermarkedAudio the pipeline accepts. The isinstance check is the one
         # place all synthesized audio passes through, so an overridden hook that
         # hands the raw audio back fails closed here instead of reaching a socket.
-        # The watermark stays on the loop: today it only builds a dataclass.
-        # It moves into the thread alongside synthesis once the marking is
-        # done in the audio domain.
-        audio = self._apply_watermark(raw)
         if not isinstance(audio, WatermarkedAudio):
             raise TypeError(
                 f"{type(self).__name__}._apply_watermark() must return "
@@ -78,7 +76,9 @@ class TTSService:
     ) -> RawAudio:
         # Synchronous on purpose: this is the replacement point for a real
         # model, and real inference blocks. synthesize() dispatches it to a
-        # thread, so an `await` in here would have no loop to run on.
+        # thread. Writing it as `async def` is the trap: run_sync would hand
+        # back a coroutine it never runs, so the inference would silently
+        # never happen.
         # TODO: Internal synthesis - replace with real inference. Heavy
         # inference must run in an executor/worker, never inline on the event
         # loop. Clone from state.speaker when it is sealed; None means the

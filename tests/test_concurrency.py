@@ -1,12 +1,21 @@
-"""El event loop no puede congelarse mientras corre una inferencia.
+"""Dos propiedades de "la inferencia corre fuera del event loop", cada una con
+su propio test porque una no implica la otra.
 
-Las N conexiones WebSocket de un proceso comparten un unico event loop. Una
-inferencia que corre inline sobre ese loop no congela a la sesion que la
-disparo: congela a todas. Marcar el metodo como `async def` no cambia nada -
-sin un `await` real adentro, el control nunca vuelve al loop.
+1. El event loop no puede congelarse mientras corre una inferencia. Las N
+   conexiones WebSocket de un proceso comparten un unico event loop. Una
+   inferencia que corre inline sobre ese loop no congela a la sesion que la
+   disparo: congela a todas. Marcar el metodo como `async def` no cambia nada
+   - sin un `await` real adentro, el control nunca vuelve al loop. El canario
+   de responsividad inyecta un backend que bloquea a proposito: contra un
+   pipeline que ejecuta la inferencia inline el GET tarda lo mismo que la
+   inferencia.
 
-Estos tests inyectan un backend que bloquea a proposito: contra un pipeline
-que ejecuta la inferencia inline el GET tarda lo mismo que la inferencia.
+2. Sacar la inferencia del loop no alcanza si dos sesiones pueden correrla en
+   paralelo contra la misma GPU: el limiter de un token por etapa es lo que
+   serializa ese acceso. El canario de responsividad no ve esta diferencia -
+   sin limiter el loop queda libre igual - asi que la serializacion tiene su
+   propio test, parametrizado por etapa para que borrar el limiter de una
+   sola etapa siga rompiendo la suite.
 """
 
 import asyncio
@@ -15,6 +24,7 @@ import time
 
 import pytest
 
+from app.pipeline.contracts import ASRState, MTState, TTSState
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
 from app.services.tts_service import TTSService
@@ -108,35 +118,77 @@ def test_event_loop_stays_responsive_during_inference(ws_client, stage):
     )
 
 
-async def test_inference_stage_is_serialized():
-    """Dos inferencias de la misma etapa no pueden solaparse.
+SERIALIZATION_SLEEP_SECONDS = 0.3
 
-    El limiter de un token es lo que serializa el acceso a la GPU. Sin el, el
-    despacho usaria el pool de threads por defecto - 40 tokens, compartidos
-    con las dependencias sincronas del framework - y las dos inferencias
-    saldrian en paralelo. El canario de arriba no ve esa diferencia: sin
-    limiter el event loop queda libre igual.
+
+def _slow_engines(sleep_seconds: float):
+    """Un backend lento por etapa, mismo patron que _blocking_engines pero sin
+    threading.Event y con un sleep corto: 3 etapas x 2 corridas x
+    BLOCKING_SECONDS sumaria 12s a la suite solo para medir serializacion.
     """
-    from app.pipeline.contracts import ASRState
-
-    sleep_seconds = 0.3
 
     class SlowASRService(ASRService):
         def _transcribe(self, state, audio_bytes, language):
             time.sleep(sleep_seconds)
             return ("slow", language or "en", 1.0)
 
-    engine = SlowASRService("stub", "cpu")
+    class SlowMTService(MTService):
+        def _translate(self, state, text, source_language, target_language):
+            time.sleep(sleep_seconds)
+            return "slow"
+
+    class SlowTTSService(TTSService):
+        def _synthesize(self, state, text, language):
+            time.sleep(sleep_seconds)
+            return TTSService._synthesize(self, state, text, language)
+
+    return {
+        "asr": SlowASRService,
+        "mt": SlowMTService,
+        "tts": SlowTTSService,
+    }
+
+
+def _run_twice(stage, engine):
+    """Dos llamadas concurrentes al metodo publico de `stage`, cada etapa con
+    la firma que le corresponde hoy."""
+
+    if stage == "asr":
+        calls = (
+            engine.transcribe(ASRState(), b"aaa"),
+            engine.transcribe(ASRState(), b"bbb"),
+        )
+    elif stage == "mt":
+        calls = (
+            engine.translate(MTState(), "a", "en", "es"),
+            engine.translate(MTState(), "b", "en", "es"),
+        )
+    else:
+        calls = (
+            engine.synthesize(TTSState(), "a", "es"),
+            engine.synthesize(TTSState(), "b", "es"),
+        )
+    return asyncio.gather(*calls)
+
+
+@pytest.mark.parametrize("stage", ["asr", "mt", "tts"])
+async def test_inference_stage_is_serialized(stage):
+    """Dos inferencias de la misma etapa no pueden solaparse.
+
+    Parametrizado por etapa: el limiter vive uno por modulo, asi que borrarlo
+    en mt_service.py o tts_service.py no toca el caso de asr y una version no
+    parametrizada de este test seria ciega a esas dos etapas.
+    """
+    engine_cls = _slow_engines(SERIALIZATION_SLEEP_SECONDS)[stage]
+    engine = engine_cls("stub", "cpu")
 
     start = time.monotonic()
-    await asyncio.gather(
-        engine.transcribe(ASRState(), b"aaa"),
-        engine.transcribe(ASRState(), b"bbb"),
-    )
+    await _run_twice(stage, engine)
     elapsed = time.monotonic() - start
 
-    assert elapsed >= 2 * sleep_seconds, (
-        f"dos inferencias de la misma etapa tardaron {elapsed:.3f}s en vez de "
-        f"al menos {2 * sleep_seconds}s: salieron en paralelo, el limiter de "
-        f"un token no se esta aplicando"
+    assert elapsed >= 2 * SERIALIZATION_SLEEP_SECONDS, (
+        f"dos inferencias de la etapa {stage} tardaron {elapsed:.3f}s en vez "
+        f"de al menos {2 * SERIALIZATION_SLEEP_SECONDS}s: salieron en "
+        f"paralelo, el limiter de un token no se esta aplicando en "
+        f"{stage}_service.py"
     )
