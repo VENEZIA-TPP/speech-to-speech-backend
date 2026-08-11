@@ -1,13 +1,29 @@
 import contextlib
+import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from pydantic import BaseModel
 
 from app.core.config import settings
 from app.dependencies import get_pipeline_service
 from app.pipeline.contracts import SessionState
+from app.schemas.events import (
+    AudioDelta,
+    AudioDone,
+    ErrorEvent,
+    SegmentMetrics,
+    SessionCompleted,
+    SessionCreated,
+    TranscriptionCompleted,
+    TranslationCompleted,
+)
 from app.services.translation_pipeline_service import TranslationPipelineService
 
 router = APIRouter()
+
+
+async def _send(websocket: WebSocket, event: BaseModel) -> None:
+    await websocket.send_json(event.model_dump())
 
 
 @router.websocket("/ws/{session_id}")
@@ -47,13 +63,19 @@ async def pipeline_websocket(
         return
 
     await websocket.accept(subprotocol=echo_subprotocol)
+    await _send(websocket, SessionCreated(session_id=session_id))
 
     # Born with the connection, dies with this coroutine. There is no global
     # session_id -> state map to index wrong, and the engines are frozen, so
-    # this is the only place per-session streaming state can live (ADR 0003).
+    # this is the only place per-session streaming state can live.
     state = SessionState()
 
-    chunk_index = 0
+    # A segment is what the client is told about; today the pipeline closes one
+    # per chunk received, which is why this doubles as the chunk index the
+    # pipeline persists. Voice-driven segmentation breaks that equality, and
+    # the protocol already allows it to: nothing sent over the wire promises
+    # one segment per chunk.
+    segment_index = 0
     # True once this handler has decided the session's terminal status, so the
     # cleanup below cannot overwrite a FAILED session with COMPLETED.
     status_decided = False
@@ -68,20 +90,42 @@ async def pipeline_websocket(
             if data["type"] == "websocket.disconnect":
                 break
 
-            # Control message
+            # Control message: a JSON object with a `type`.
             if "text" in data:
-                if data["text"] == "END":
+                try:
+                    event_type = json.loads(data["text"])["type"]
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    await _send(
+                        websocket,
+                        ErrorEvent(
+                            code="invalid_event",
+                            message="expected a JSON object with a `type` field",
+                        ),
+                    )
+                    continue
+
+                if event_type == "input_audio.commit":
                     await pipeline_service.complete_session(session_id)
                     status_decided = True
-                    await websocket.send_json(
-                        {
-                            "status": "completed",
-                            "session_id": session_id,
-                            "total_chunks": chunk_index,
-                        }
+                    await _send(
+                        websocket,
+                        SessionCompleted(
+                            session_id=session_id, total_segments=segment_index
+                        ),
                     )
                     break
-                continue  # ignore other text frames
+
+                # An unrecognized control frame is answered, not swallowed, and
+                # it does not tear down the audio stream over one bad frame.
+                # The echo is truncated: it is client-controlled input.
+                await _send(
+                    websocket,
+                    ErrorEvent(
+                        code="invalid_event",
+                        message=f"unknown event type: {str(event_type)[:64]}",
+                    ),
+                )
+                continue
 
             # Audio chunk (binary)
             if "bytes" in data:
@@ -93,16 +137,23 @@ async def pipeline_websocket(
                         state,
                         session_id=session_id,
                         audio_bytes=data["bytes"],
-                        chunk_index=chunk_index,
+                        chunk_index=segment_index,
                     )
                 except ValueError as exc:
-                    await websocket.send_json({"error": str(exc)})
+                    await _send(
+                        websocket,
+                        ErrorEvent(
+                            code="pipeline_failed",
+                            segment_index=segment_index,
+                            message=str(exc),
+                        ),
+                    )
                     break
                 except Exception as exc:
                     # Mirrors the finally block's suppress on complete_session():
                     # if fail_session()'s own write fails (its rollback trips, a
                     # DB blip), that must not raise a second exception out of the
-                    # handler - that would skip the send_json below and, worse,
+                    # handler - that would skip the error event below and, worse,
                     # leave status_decided False, making the finally block try
                     # (and very possibly also fail) to mark the session COMPLETED
                     # instead - the same stuck-ACTIVE failure shape already fixed
@@ -110,14 +161,65 @@ async def pipeline_websocket(
                     with contextlib.suppress(Exception):
                         await pipeline_service.fail_session(session_id)
                     status_decided = True
-                    await websocket.send_json({"error": f"Pipeline error: {exc}"})
+                    await _send(
+                        websocket,
+                        ErrorEvent(
+                            code="pipeline_failed",
+                            segment_index=segment_index,
+                            message=f"Pipeline error: {exc}",
+                        ),
+                    )
                     break
-                # Send failures (client gone mid-frame-pair) must not mark the
+
+                index = segment_index
+                segment_index += 1
+
+                # Send failures (client gone mid-burst) must not mark the
                 # session FAILED - they fall through to the disconnect handling.
-                chunk_index += 1
-                await websocket.send_json(result.model_dump())
+                await _send(
+                    websocket,
+                    TranscriptionCompleted(
+                        segment_index=index,
+                        transcript=result.original_text,
+                        language_code=result.detected_language,
+                    ),
+                )
+                await _send(
+                    websocket,
+                    TranslationCompleted(
+                        segment_index=index,
+                        text=result.translated_text,
+                        target_language=result.target_language,
+                    ),
+                )
                 if result.synthesized_audio:
+                    await _send(
+                        websocket,
+                        AudioDelta(
+                            segment_index=index,
+                            seq=0,
+                            size_bytes=len(result.synthesized_audio),
+                        ),
+                    )
                     await websocket.send_bytes(result.synthesized_audio)
+                await _send(
+                    websocket,
+                    AudioDone(
+                        segment_index=index,
+                        watermarked=bool(result.watermarked),
+                        watermark_method=result.watermark_method,
+                    ),
+                )
+                await _send(
+                    websocket,
+                    SegmentMetrics(
+                        segment_index=index,
+                        asr_ms=result.asr_processing_time_ms,
+                        mt_ms=result.mt_processing_time_ms,
+                        tts_ms=result.tts_processing_time_ms,
+                        e2e_ms=result.total_processing_time_ms,
+                    ),
+                )
 
     except WebSocketDisconnect:
         pass
