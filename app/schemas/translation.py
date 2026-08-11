@@ -25,7 +25,6 @@ class PipelineResult(BaseModel):
     asr_processing_time_ms: Optional[int] = None
     mt_processing_time_ms: Optional[int] = None
     tts_processing_time_ms: Optional[int] = None
-    total_processing_time_ms: Optional[int] = None
     synthesized_audio_size_bytes: Optional[int] = None
     watermarked: Optional[bool] = None
     watermark_method: Optional[str] = None

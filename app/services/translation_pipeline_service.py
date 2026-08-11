@@ -9,14 +9,16 @@ Flow per audio chunk:
   5. Persist Translation to DB.
   6. Run TTSService.synthesize() -> synthesized audio + watermark tag + latency
      (TTS output is not persisted this delivery).
-  7. Return PipelineResult with all metrics + synthesized audio.
+  7. Return PipelineResult with the per-stage metrics + synthesized audio.
+     The end-to-end clock deliberately does NOT live here: measured from
+     inside this method it would miss the event serialization and the send,
+     which is how it came to underreport. It belongs to the WebSocket
+     handler, the only place that can see the whole window.
 
 Per-session streaming state (buffer, previous prompt, decoder cache) travels in
 the SessionState the WebSocket handler builds at accept() time - never on an
 engine, which is frozen. See docs/adr/0003-workers-persistentes-y-estado-por-sesion.md.
 """
-
-import time
 
 from app.models.translation_session import SessionStatus
 from app.pipeline.contracts import SessionState
@@ -58,8 +60,6 @@ class TranslationPipelineService:
         audio_bytes: bytes,
         chunk_index: int,
     ) -> PipelineResult:
-        start_total = time.monotonic()
-
         session = await self.session_repo.get_by_id(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
@@ -106,7 +106,6 @@ class TranslationPipelineService:
         )
 
         audio = tts_result.audio
-        total_ms = int((time.monotonic() - start_total) * 1000)
 
         return PipelineResult(
             chunk_index=chunk_index,
@@ -118,7 +117,6 @@ class TranslationPipelineService:
             asr_processing_time_ms=asr_result.processing_time_ms,
             mt_processing_time_ms=mt_result.processing_time_ms,
             tts_processing_time_ms=tts_result.processing_time_ms,
-            total_processing_time_ms=total_ms,
             synthesized_audio_size_bytes=len(audio.data),
             # True by construction: WatermarkedAudio cannot exist with an empty
             # method, and it is the only audio type that gets this far.

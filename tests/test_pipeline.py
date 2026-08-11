@@ -3,7 +3,7 @@ Pipeline tests - covers stub ASR/MT/TTS services and the full pipeline flow.
 
 When real models are integrated:
   - Replace stub assertions with actual expected outputs.
-  - Add latency threshold assertions (e.g. total_processing_time_ms < 5000).
+  - Add latency threshold assertions (e.g. e2e_ms < 5000).
   - Add BLEU score evaluation against a reference translation corpus.
 """
 
@@ -131,10 +131,6 @@ async def test_pipeline_processes_chunk(db_session):
     assert result.translated_text
     assert result.source_language == "en"
     assert result.target_language == "es"
-    assert (
-        result.total_processing_time_ms is not None
-        and result.total_processing_time_ms >= 0
-    )
     assert (
         result.tts_processing_time_ms is not None and result.tts_processing_time_ms >= 0
     )
