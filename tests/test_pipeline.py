@@ -9,6 +9,7 @@ When real models are integrated:
 
 import hashlib
 import io
+import json
 import wave
 
 import pytest
@@ -148,55 +149,191 @@ async def test_pipeline_processes_chunk(db_session):
     assert len(translations) == 1
 
 
+def _read_segment(ws) -> dict:
+    """Read one segment's burst of events, keyed by event type.
+
+    Reads by type instead of by position on purpose: the protocol no longer
+    promises a fixed number of frames per chunk the client sent. The binary
+    frame is read right after the `audio.delta` that announces it and lands
+    under the "audio" key. Returns on `segment.metrics` (the segment's last
+    event) or on an `error`, so a broken segment fails the test instead of
+    hanging it - there is no pytest-timeout configured.
+    """
+    segment: dict = {}
+    while True:
+        event = ws.receive_json()
+        segment[event["type"]] = event
+        if event["type"] == "audio.delta":
+            segment["audio"] = ws.receive_bytes()
+        if event["type"] in ("segment.metrics", "error"):
+            return segment
+
+
 # E2E - WebSocket protocol (full stub pipeline)
 def test_ws_pipeline_full_stub_flow(ws_client):
-    """Also proves SessionState survives across chunks within one connection.
+    """Two chunks in, two segments out, with no lock-step in between.
 
-    Passes falsely if `state = SessionState()` moves inside the receive loop
-    in app/api/controller/pipeline.py - the second chunk's ASR counter would
-    reset to 1 instead of advancing to 2.
+    Both chunks are sent before a single reply is read: nothing in the
+    protocol lets the client assume a response arrives before it may send
+    again. Also proves SessionState survives across chunks within one
+    connection - it fails if `state = SessionState()` moves inside the
+    receive loop in app/api/controller/pipeline.py, because the second
+    segment's ASR counter would reset to 1 instead of advancing to 2.
     """
     created = ws_client.post(
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     )
     assert created.status_code == 201
     session_id = created.json()["id"]
-
     token = created.json()["ws_token"]
+
     with ws_client.websocket_connect(
         f"/pipeline/ws/{session_id}", subprotocols=[token]
     ) as ws:
+        assert ws.receive_json() == {
+            "type": "session.created",
+            "session_id": session_id,
+        }
+
         ws.send_bytes(b"fake_audio_chunk")
-
-        msg = ws.receive_json()
-        assert msg["chunk_index"] == 0
-        assert msg["original_text"]
-        assert "chunk 1" in msg["original_text"]
-        assert msg["translated_text"]
-        assert msg["asr_processing_time_ms"] >= 0
-        assert msg["mt_processing_time_ms"] >= 0
-        assert msg["tts_processing_time_ms"] >= 0
-        assert msg["watermarked"] is True
-        assert msg["synthesized_audio_size_bytes"] > 0
-        assert "synthesized_audio" not in msg
-
-        audio = ws.receive_bytes()
-        assert len(audio) == msg["synthesized_audio_size_bytes"]
-        assert audio[:4] == b"RIFF"
-
         ws.send_bytes(b"fake_audio_chunk_2")
 
-        msg2 = ws.receive_json()
-        assert msg2["chunk_index"] == 1
-        assert "chunk 2" in msg2["original_text"]
+        first = _read_segment(ws)
+        second = _read_segment(ws)
 
-        audio2 = ws.receive_bytes()
-        assert len(audio2) == msg2["synthesized_audio_size_bytes"]
+        transcription = first["transcription.completed"]
+        assert transcription["segment_index"] == 0
+        assert "chunk 1" in transcription["transcript"]
+        assert first["translation.completed"]["segment_index"] == 0
+        assert first["translation.completed"]["text"]
+        assert first["translation.completed"]["target_language"] == "es"
 
-        ws.send_text("END")
-        done = ws.receive_json()
-        assert done["status"] == "completed"
-        assert done["total_chunks"] == 2
+        assert first["audio.delta"]["segment_index"] == 0
+        assert first["audio.delta"]["seq"] == 0
+        assert first["audio"][:4] == b"RIFF"
+        assert first["audio.delta"]["size_bytes"] == len(first["audio"])
+        assert first["audio.done"] == {
+            "type": "audio.done",
+            "segment_index": 0,
+            "watermarked": True,
+            "watermark_method": first["audio.done"]["watermark_method"],
+        }
+        assert first["audio.done"]["watermark_method"]
+
+        metrics = first["segment.metrics"]
+        assert metrics["segment_index"] == 0
+        assert metrics["asr_ms"] >= 0
+        assert metrics["mt_ms"] >= 0
+        assert metrics["tts_ms"] >= 0
+        assert metrics["e2e_ms"] >= 0
+
+        # Raw audio rides in its own frame, never inside any JSON event.
+        assert all(
+            "synthesized_audio" not in event
+            for event in first.values()
+            if isinstance(event, dict)
+        )
+
+        assert "chunk 2" in second["transcription.completed"]["transcript"]
+        assert second["segment.metrics"]["segment_index"] == 1
+        assert second["audio.delta"]["size_bytes"] == len(second["audio"])
+
+        ws.send_text(json.dumps({"type": "input_audio.commit"}))
+        assert ws.receive_json() == {
+            "type": "session.completed",
+            "session_id": session_id,
+            "total_segments": 2,
+        }
+
+
+def test_ws_invalid_control_frame_does_not_kill_stream(ws_client):
+    """Un frame de control mal formado se responde, no se descarta ni cierra."""
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+
+        ws.send_text("not json at all")
+        assert ws.receive_json() == {
+            "type": "error",
+            "code": "invalid_event",
+            "message": "expected a JSON object with a `type` field",
+            "segment_index": None,
+        }
+
+        ws.send_text(json.dumps({"type": "session.update"}))
+        unknown = ws.receive_json()
+        assert unknown["code"] == "invalid_event"
+        assert "session.update" in unknown["message"]
+
+        # The audio stream survives two bad control frames.
+        ws.send_bytes(b"fake_audio_chunk")
+        segment = _read_segment(ws)
+        assert segment["audio.done"]["watermarked"] is True
+
+        # Drive the session to a decided terminal status before the `with`
+        # block exits: complete_session() writes before session.completed is
+        # sent, so reading that event is a genuine sync point, unlike letting
+        # the harness's own teardown race the connection closed.
+        ws.send_text(json.dumps({"type": "input_audio.commit"}))
+        assert ws.receive_json()["type"] == "session.completed"
+
+
+def test_ws_audio_done_no_watermark_claim_without_audio(ws_client):
+    """A segment with no audio must not claim a watermark either.
+
+    TTSResult.audio is normally a WatermarkedAudio, whose __post_init__
+    rejects empty data - the stub can never produce this case by itself.
+    This overrides synthesize() (not just the _synthesize()/_apply_watermark()
+    hooks that type guarantee runs through) with a fake audio object to
+    simulate what a TTS backend returning nothing would otherwise let slip
+    through as an unearned watermark claim, and checks the controller does
+    not repeat that claim over the wire - audio.done still closes the
+    segment, but with no watermark and no binary frame behind it.
+    """
+    from app.dependencies import get_tts_service
+    from app.main import app
+    from app.services.tts_service import TTSResult
+
+    class _EmptyAudio:
+        data = b""
+        method = "stub-metadata-tag"
+
+    class SilentTTSService(TTSService):
+        async def synthesize(self, state, text, language):
+            return TTSResult(audio=_EmptyAudio(), processing_time_ms=0)
+
+    app.dependency_overrides[get_tts_service] = lambda: SilentTTSService("stub", "cpu")
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        ws.send_bytes(b"fake_audio_chunk")
+        segment = _read_segment(ws)
+
+        assert "audio.delta" not in segment
+        assert "audio" not in segment
+        assert segment["audio.done"] == {
+            "type": "audio.done",
+            "segment_index": 0,
+            "watermarked": False,
+            "watermark_method": None,
+        }
+
+        # Same sync reasoning as test_ws_invalid_control_frame_does_not_kill_stream:
+        # drive to a decided terminal status instead of letting the harness
+        # teardown race the still-unwritten completion status.
+        ws.send_text(json.dumps({"type": "input_audio.commit"}))
+        assert ws.receive_json()["type"] == "session.completed"
 
 
 def test_ws_unknown_session_is_rejected(ws_client):
@@ -234,9 +371,54 @@ def test_ws_pipeline_error_marks_session_failed(ws_client):
     with ws_client.websocket_connect(
         f"/pipeline/ws/{session_id}", subprotocols=[token]
     ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"fake_audio_chunk")
         msg = ws.receive_json()
-        assert "Pipeline error" in msg["error"]
+        assert msg["type"] == "error"
+        assert msg["code"] == "pipeline_failed"
+        assert msg["segment_index"] == 0
+        assert "Pipeline error" in msg["message"]
+        assert ws.receive()["type"] == "websocket.close"
+
+    assert (
+        ws_client.get(f"/sessions/{session_id}", headers=headers).json()["status"]
+        == "failed"
+    )
+
+
+def test_ws_pipeline_value_error_marks_session_failed(ws_client):
+    """A ValueError out of process_audio_chunk() must fail the session too.
+
+    Same wire label (`pipeline_failed`) as the RuntimeError path covered by
+    test_ws_pipeline_error_marks_session_failed, but ValueError is caught by
+    its own except clause - this guards that clause marks the session FAILED
+    just like its sibling, instead of leaving it for the finally block to
+    mark COMPLETED.
+    """
+    from app.dependencies import get_asr_service
+    from app.main import app
+
+    class BrokenASRService(ASRService):
+        async def _transcribe(self, state, audio_bytes, language):
+            raise ValueError("boom")
+
+    app.dependency_overrides[get_asr_service] = lambda: BrokenASRService("stub", "cpu")
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    )
+    session_id = created.json()["id"]
+    token = created.json()["ws_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{session_id}", subprotocols=[token]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        ws.send_bytes(b"fake_audio_chunk")
+        msg = ws.receive_json()
+        assert msg["type"] == "error"
+        assert msg["code"] == "pipeline_failed"
         assert ws.receive()["type"] == "websocket.close"
 
     assert (
@@ -275,10 +457,12 @@ def test_raw_audio_never_reaches_socket(ws_client):
     with ws_client.websocket_connect(
         f"/pipeline/ws/{session_id}", subprotocols=[token]
     ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"fake_audio_chunk")
         msg = ws.receive_json()
-        assert "Pipeline error" in msg["error"]
-        assert "WatermarkedAudio" in msg["error"]
+        assert msg["type"] == "error"
+        assert "Pipeline error" in msg["message"]
+        assert "WatermarkedAudio" in msg["message"]
         # The next frame is the close, never audio.
         assert ws.receive()["type"] == "websocket.close"
 
@@ -313,9 +497,9 @@ def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client):
     with ws_client.websocket_connect(
         f"/pipeline/ws/{session_id}", subprotocols=[token]
     ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"fake_audio_chunk")
-        ws.receive_json()
-        ws.receive_bytes()
+        _read_segment(ws)
         # Close from the client side ourselves, then wait for the server's own
         # close frame. This forces the test to observe the disconnect branch
         # actually running server-side: letting the `with` block's own
@@ -352,8 +536,9 @@ def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client):
     with ws_client.websocket_connect(
         f"/pipeline/ws/{session_id}", subprotocols=[token]
     ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"fake_audio_chunk")
-        assert "Pipeline error" in ws.receive_json()["error"]
+        assert "Pipeline error" in ws.receive_json()["message"]
         # A diferencia de test_ws_pipeline_error_marks_session_failed, NO se lee
         # el frame de cierre: se sale del bloque directamente.
 
@@ -409,13 +594,13 @@ def test_ws_accepts_own_token(ws_client):
     ) as ws:
         # A browser that offers a subprotocol and doesn't get one echoed back
         # in the handshake response treats the connection as failed to open -
-        # this is the regression guard for that (see fix round 1 report).
+        # this is the regression guard for that.
         assert ws.accepted_subprotocol == created["ws_token"]
+        assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"fake_audio_chunk")
-        assert ws.receive_json()["chunk_index"] == 0
-        ws.receive_bytes()
-        ws.send_text("END")
-        assert ws.receive_json()["status"] == "completed"
+        assert _read_segment(ws)["segment.metrics"]["segment_index"] == 0
+        ws.send_text(json.dumps({"type": "input_audio.commit"}))
+        assert ws.receive_json()["type"] == "session.completed"
 
 
 def test_ws_rejects_oversized_frame(ws_client):
@@ -424,12 +609,49 @@ def test_ws_rejects_oversized_frame(ws_client):
     created = ws_client.post(
         "/sessions/", json={"source_language": "en", "target_language": "es"}
     ).json()
+    headers = {"Authorization": f"Bearer {created['ws_token']}"}
 
     with ws_client.websocket_connect(
         f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
     ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
         ws.send_bytes(b"\x00" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
         assert ws.receive()["code"] == 1009  # RFC 6455: message too big
+
+    # Regression guard for the status write ordering: this must land
+    # COMPLETED, not be left ACTIVE for the finally block to race against a
+    # concurrent shutdown.
+    assert (
+        ws_client.get(f"/sessions/{created['id']}", headers=headers).json()["status"]
+        == "completed"
+    )
+
+
+def test_ws_rejects_oversized_text_frame(ws_client):
+    """A text control frame has the same size cap as a binary chunk.
+
+    Unlike the old protocol, which only ever compared a text frame to a
+    constant, this one parses it as JSON - an unbounded text frame would
+    reach json.loads() bounded only by uvicorn's much larger default.
+    """
+    from app.core.config import settings
+
+    created = ws_client.post(
+        "/sessions/", json={"source_language": "en", "target_language": "es"}
+    ).json()
+    headers = {"Authorization": f"Bearer {created['ws_token']}"}
+
+    with ws_client.websocket_connect(
+        f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
+    ) as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        ws.send_text("x" * (settings.MAX_AUDIO_FRAME_BYTES + 1))
+        assert ws.receive()["code"] == 1009  # RFC 6455: message too big
+
+    assert (
+        ws_client.get(f"/sessions/{created['id']}", headers=headers).json()["status"]
+        == "completed"
+    )
 
 
 def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck():
@@ -492,9 +714,10 @@ def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck():
             with tc.websocket_connect(
                 f"/pipeline/ws/{session_id}", subprotocols=[token]
             ) as ws:
+                assert ws.receive_json()["type"] == "session.created"
                 ws.send_bytes(b"fake_audio_chunk")
                 msg = ws.receive_json()
-                assert "error" in msg
+                assert msg["type"] == "error"
                 assert ws.receive()["type"] == "websocket.close"
 
             assert (
@@ -575,3 +798,53 @@ async def test_duplicate_chunk_index_rejected(db_session):
     # the fixture's drop_all fails and the error surfaces as a teardown cascade
     # in unrelated tests.
     await db_session.rollback()
+
+
+def test_ws_event_wire_shape():
+    """El `type` de cada evento es parte del contrato, no un detalle interno."""
+    from app.schemas.events import (
+        AudioDelta,
+        AudioDone,
+        ErrorEvent,
+        SegmentMetrics,
+        SessionCompleted,
+        SessionCreated,
+        TranscriptionCompleted,
+        TranslationCompleted,
+    )
+
+    assert SessionCreated(session_id=7).model_dump() == {
+        "type": "session.created",
+        "session_id": 7,
+    }
+    assert SessionCompleted(session_id=7, total_segments=2).model_dump() == {
+        "type": "session.completed",
+        "session_id": 7,
+        "total_segments": 2,
+    }
+    assert AudioDelta(segment_index=0, seq=0, size_bytes=44).model_dump() == {
+        "type": "audio.delta",
+        "segment_index": 0,
+        "seq": 0,
+        "size_bytes": 44,
+    }
+    assert ErrorEvent(code="invalid_event", message="boom").model_dump() == {
+        "type": "error",
+        "code": "invalid_event",
+        "message": "boom",
+        "segment_index": None,
+    }
+    assert [
+        e(segment_index=0, **kwargs).model_dump()["type"]
+        for e, kwargs in [
+            (TranscriptionCompleted, {"transcript": "hola"}),
+            (TranslationCompleted, {"text": "hi", "target_language": "en"}),
+            (AudioDone, {"watermarked": True}),
+            (SegmentMetrics, {}),
+        ]
+    ] == [
+        "transcription.completed",
+        "translation.completed",
+        "audio.done",
+        "segment.metrics",
+    ]

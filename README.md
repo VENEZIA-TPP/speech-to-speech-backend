@@ -93,14 +93,32 @@ Interactive docs: `http://localhost:8000/docs`
 
 ## WebSocket protocol
 
-```
-Client  ->  Server   Sec-WebSocket-Protocol: <ws_token>   (handshake; from POST /sessions/ response)
-Client  ->  Server   binary frame   (WAV chunk, 16 kHz mono pcm_s16le)
-Server  ->  Client   JSON frame     PipelineResult (texts, metrics, watermark info)
-Server  ->  Client   binary frame   synthesized WAV (iff synthesized_audio_size_bytes > 0)
-Client  ->  Server   text "END"     signals end of stream
-Server  ->  Client   JSON           { "status": "completed", ... }
-```
+Handshake: `Sec-WebSocket-Protocol: <ws_token>` (the token comes from the
+`POST /sessions/` response). The client then streams binary WAV chunks
+(16 kHz mono pcm_s16le) and sends `{"type":"input_audio.commit"}` to end the
+stream.
+
+Every server frame is a JSON event with a `type`, except the synthesized audio,
+which travels as a bare binary frame right after the `audio.delta` announcing
+it. Events are keyed by `segment_index`, **not** by the chunk the client sent:
+one segment per chunk is what the pipeline happens to do today, and the client
+must not rely on it.
+
+| Event | Payload |
+|---|---|
+| `session.created` | `session_id` |
+| `transcription.completed` | `segment_index`, `transcript`, `language_code` |
+| `translation.completed` | `segment_index`, `text`, `target_language` |
+| `audio.delta` | `segment_index`, `seq`, `size_bytes` — followed by one binary frame |
+| `audio.done` | `segment_index`, `watermarked`, `watermark_method` |
+| `segment.metrics` | `segment_index`, `asr_ms`, `mt_ms`, `tts_ms`, `e2e_ms` |
+| `session.completed` | `session_id`, `total_segments` |
+| `error` | `code`, `message`, `segment_index` |
+
+A malformed control frame gets `error` with `code: "invalid_event"` and the
+connection stays open; a pipeline failure gets `code: "pipeline_failed"`, marks
+the session failed and closes. A binary frame over the size limit closes the
+connection with 1009.
 
 ---
 
