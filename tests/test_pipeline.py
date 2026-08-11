@@ -93,7 +93,7 @@ async def test_health_endpoint(client: AsyncClient):
 
 
 async def _build_pipeline(db_session):
-    from app.pipeline.vad import build_segmenter
+    from tests.conftest import pinned_segmenter
     from app.services.translation_pipeline_service import TranslationPipelineService
     from app.repositories.translation_session_repository import (
         SQLAlchemyTranslationSessionRepository,
@@ -119,7 +119,7 @@ async def _build_pipeline(db_session):
         asr_service=ASRService("stub", "cpu"),
         mt_service=MTService("stub", "cpu"),
         tts_service=TTSService("stub", "cpu"),
-        segmenter=build_segmenter(),
+        segmenter=pinned_segmenter(),
     )
     return pipeline, session, transcription_repo, translation_repo
 
@@ -887,6 +887,7 @@ def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck(speech):
 
     from app.db.base import Base
     from app.db.session import get_session
+    from app.dependencies import get_segmenter
     from app.main import app
     from app.repositories.transcription_repository import (
         SQLAlchemyTranscriptionRepository,
@@ -895,7 +896,12 @@ def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck(speech):
         SQLAlchemyTranslationSessionRepository,
     )
     from app.schemas.translation_session import TranslationSessionCreate
-    from tests.conftest import TestSessionLocal, _run_ddl, override_get_session
+    from tests.conftest import (
+        TestSessionLocal,
+        _run_ddl,
+        override_get_session,
+        pinned_segmenter,
+    )
 
     async def setup():
         await _run_ddl(Base.metadata.create_all)
@@ -918,6 +924,12 @@ def test_ws_duplicate_chunk_mid_pipeline_does_not_leave_session_stuck(speech):
     session_id, token = asyncio.run(setup())
 
     app.dependency_overrides[get_session] = override_get_session
+    # Este test arma su propio TestClient en vez de usar la fixture ws_client,
+    # asi que tiene que repetir el override del segmentador a mano. Sin el, la
+    # segmentacion sale de la configuracion del entorno y un VAD_MIN_SILENCE_MS
+    # mas alto que el silencio del fixture no rompe este test: lo **cuelga**,
+    # esperando para siempre un evento que ya no va a llegar.
+    app.dependency_overrides[get_segmenter] = pinned_segmenter
     try:
         with TestClient(app) as tc:
             headers = {"Authorization": f"Bearer {token}"}

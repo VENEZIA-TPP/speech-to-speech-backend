@@ -12,6 +12,12 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.db.base import Base
 from app.db.session import get_session
+from app.dependencies import get_segmenter
+from app.pipeline.vad import (
+    FRAME_SAMPLES,
+    VoiceSegmenter,
+    build_segmenter,
+)
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -56,6 +62,7 @@ async def db_session():
 @pytest_asyncio.fixture(scope="function")
 async def client(db_session):
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_segmenter] = pinned_segmenter
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -66,6 +73,43 @@ async def client(db_session):
 
 
 _FIXTURE_WAV = Path(__file__).parent / "fixtures" / "es_sistema.wav"
+
+# Segmentación con parámetros fijos para todo lo que corra contra la app.
+#
+# `build_segmenter()` lee la configuración, y `VAD_MIN_SILENCE_MS` es un dial
+# que se espera que cada quien ajuste en su propio `.env` - que está
+# gitignoreado y es local. Sin esto, subirlo a 500 no rompe la suite: la
+# **cuelga**. Los tests de WebSocket esperan un segmento que nunca llega, y no
+# hay pytest-timeout configurado, así que el bloqueo es para siempre y no dice
+# de qué se trata. Cambiar un valor soportado tiene que ser inofensivo para los
+# tests.
+_TEST_VAD = dict(
+    threshold=0.5,
+    min_silence_ms=300,
+    min_speech_ms=384,
+    speech_pad_ms=300,
+    max_speech_ms=8000,
+    lookback_ms=400,
+)
+
+
+def pinned_segmenter() -> VoiceSegmenter:
+    base = build_segmenter()
+    rate = base.sample_rate
+
+    def frames(ms: int) -> int:
+        return round(ms * rate / 1000 / FRAME_SAMPLES)
+
+    return VoiceSegmenter(
+        session=base.session,
+        sample_rate=rate,
+        threshold=_TEST_VAD["threshold"],
+        min_silence_frames=frames(_TEST_VAD["min_silence_ms"]),
+        min_speech_frames=frames(_TEST_VAD["min_speech_ms"]),
+        pad_frames=frames(_TEST_VAD["speech_pad_ms"]),
+        max_frames=frames(_TEST_VAD["max_speech_ms"]),
+        lookback_frames=frames(_TEST_VAD["lookback_ms"]),
+    )
 
 
 def speech_chunk(trailing_silence_ms: int = 600) -> bytes:
@@ -109,6 +153,7 @@ async def _run_ddl(fn):
 def ws_client():
     """Sync TestClient for WebSocket tests (httpx AsyncClient can't speak WS)."""
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_segmenter] = pinned_segmenter
 
     try:
         with TestClient(app) as tc:

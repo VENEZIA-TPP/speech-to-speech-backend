@@ -20,15 +20,54 @@ import pytest
 
 from app.core.config import settings
 from app.pipeline.contracts import VADState
-from app.pipeline.vad import build_segmenter, pcm_from_wav
+from app.pipeline.vad import (
+    FRAME_SAMPLES,
+    VoiceSegmenter,
+    build_segmenter,
+    pcm_from_wav,
+)
 
 SR = settings.AUDIO_SAMPLE_RATE
 FIXTURE = Path(__file__).parent / "fixtures" / "es_sistema.wav"
 
+# Pinned here, NOT read from settings, and that is the point: these are the
+# values the boundary cases below are written against. `min_silence_ms` is a
+# tuning dial that a developer is expected to change in their own .env - it is
+# gitignored and local - and changing a supported setting must not turn the
+# suite red on one machine and green on another. The wiring from settings to
+# segmenter has its own test at the bottom of this file.
+PARAMS = dict(
+    threshold=0.5,
+    min_silence_ms=300,
+    min_speech_ms=384,
+    speech_pad_ms=300,
+    max_speech_ms=8000,
+    lookback_ms=400,
+)
+
+
+def make_segmenter(**overrides) -> VoiceSegmenter:
+    params = {**PARAMS, **overrides}
+    base = build_segmenter()  # loads the weights once, cheaply
+
+    def frames(ms):
+        return round(ms * SR / 1000 / FRAME_SAMPLES)
+
+    return VoiceSegmenter(
+        session=base.session,
+        sample_rate=SR,
+        threshold=params["threshold"],
+        min_silence_frames=frames(params["min_silence_ms"]),
+        min_speech_frames=frames(params["min_speech_ms"]),
+        pad_frames=frames(params["speech_pad_ms"]),
+        max_frames=frames(params["max_speech_ms"]),
+        lookback_frames=frames(params["lookback_ms"]),
+    )
+
 
 @pytest.fixture(scope="module")
 def segmenter():
-    return build_segmenter()
+    return make_segmenter()
 
 
 @pytest.fixture(scope="module")
@@ -91,13 +130,10 @@ def test_min_silence_is_the_dial_that_decides(segmenter, speech):
     and would look identical from the outside.
     """
     audio = wav(speech, silence(300), speech, silence(700))
-    counts = {}
-    for min_silence_ms in (200, 400):
-        tuned = build_segmenter()
-        object.__setattr__(
-            tuned, "min_silence_frames", round(min_silence_ms * SR / 1000 / 512)
-        )
-        counts[min_silence_ms] = len(tuned.feed(VADState(), audio))
+    counts = {
+        ms: len(make_segmenter(min_silence_ms=ms).feed(VADState(), audio))
+        for ms in (200, 400)
+    }
 
     assert counts == {200: 2, 400: 1}
 
@@ -116,7 +152,7 @@ def test_silence_produces_no_segment(segmenter):
 
 def test_burst_shorter_than_min_speech_is_discarded(segmenter, speech):
     """A cough-length burst is noise, and noise must not become a segment."""
-    burst = speech[: int(SR * 0.2)]  # 200 ms, below VAD_MIN_SPEECH_MS
+    burst = speech[: int(SR * 0.2)]  # 200 ms, below min_speech_ms
 
     assert segmenter.feed(VADState(), wav(silence(300), burst, silence(600))) == []
 
@@ -148,7 +184,7 @@ def test_max_speech_forces_a_close(segmenter, speech):
 
     assert len(segments) == 2
     assert segments[0].reason == "ceiling"
-    assert duration_ms(segments[0].pcm) <= settings.VAD_MAX_SPEECH_MS
+    assert duration_ms(segments[0].pcm) <= PARAMS["max_speech_ms"]
 
 
 def test_ceiling_carries_the_remainder_instead_of_dropping_it(speech):
@@ -165,8 +201,7 @@ def test_ceiling_carries_the_remainder_instead_of_dropping_it(speech):
     must not depend on speech_pad_ms happening to be large enough to paper over
     the gap.
     """
-    wide = build_segmenter()
-    object.__setattr__(wide, "lookback_frames", round(900 * SR / 1000 / 512))
+    wide = make_segmenter(lookback_ms=900)
 
     continuous = np.concatenate([speech] * 6)
     spoken_ms = int(len(continuous) * 1000 / SR)
@@ -365,3 +400,24 @@ def test_non_wav_frame_is_rejected(segmenter):
     """Garbage bytes are a client protocol error, not silence."""
     with pytest.raises(ValueError, match="not a readable WAV"):
         segmenter.feed(VADState(), b"fake_audio_chunk")
+
+
+def test_build_segmenter_wires_the_settings():
+    """La configuración tiene que llegar al segmentador, en milisegundos y frames.
+
+    Los demás tests de este archivo fijan sus parámetros a mano para no depender
+    del .env de cada máquina, así que este es el único que cubre el cableado - y
+    sin él, un settings mal leído no rompería nada acá.
+    """
+    built = build_segmenter()
+
+    def frames(ms):
+        return round(ms * settings.AUDIO_SAMPLE_RATE / 1000 / FRAME_SAMPLES)
+
+    assert built.threshold == settings.VAD_THRESHOLD
+    assert built.sample_rate == settings.AUDIO_SAMPLE_RATE
+    assert built.min_silence_frames == frames(settings.VAD_MIN_SILENCE_MS)
+    assert built.min_speech_frames == frames(settings.VAD_MIN_SPEECH_MS)
+    assert built.pad_frames == frames(settings.VAD_SPEECH_PAD_MS)
+    assert built.max_frames == frames(settings.VAD_MAX_SPEECH_MS)
+    assert built.lookback_frames == frames(settings.VAD_CEILING_LOOKBACK_MS)
