@@ -39,6 +39,35 @@ class Settings(BaseSettings):
     AUDIO_SAMPLE_RATE: int = 16000
     AUDIO_CHUNK_DURATION_MS: int = 3000
 
+    # Voice activity detection
+    # A segment is what the pipeline runs on, and the VAD decides where one
+    # ends. These are the starting point, not calibrated truth: they were
+    # picked against reasoning about the domain and verified against synthetic
+    # speech, never against a recorded human corpus.
+    VAD_THRESHOLD: float = 0.5
+    # The latency<->quality dial, and the one most worth re-measuring. Below
+    # ~200 ms an intra-phrase breath is indistinguishable from the end of a
+    # sentence, and MT then translates a syntactically broken fragment. A
+    # conversational agent can afford to cut at 64 ms because it can speculatively
+    # reopen a turn it cut wrongly; there is no such mechanism here, so there is
+    # nothing to make an aggressive cut tolerable.
+    VAD_MIN_SILENCE_MS: int = 300
+    # Filters noise bursts. Measured on frames that actually cleared the
+    # hysteresis floor, not on segment length, so trailing silence cannot pad a
+    # burst over the bar.
+    VAD_MIN_SPEECH_MS: int = 384
+    # Pre-roll kept from before the trigger, so the attack of the first syllable
+    # is not clipped. Costs no latency: it is audio already captured.
+    VAD_SPEECH_PAD_MS: int = 300
+    # Finite on purpose. Workers are shared across sessions, so an unbounded
+    # segment is an unbounded blocking call on a shared resource: one speaker
+    # who never pauses would stall every other session. The ceiling makes the
+    # worst case bad but bounded.
+    VAD_MAX_SPEECH_MS: int = 8000
+    # How far back to look for the quietest frame when the ceiling fires, so the
+    # forced cut lands in a gap between words instead of mid-syllable.
+    VAD_CEILING_LOOKBACK_MS: int = 400
+
     # WebSocket
     # Cap on a single binary frame. 2 MB ~= 60 s of 16 kHz mono pcm_s16le, well
     # above AUDIO_CHUNK_DURATION_MS. Honest scope: by the time this is checked,

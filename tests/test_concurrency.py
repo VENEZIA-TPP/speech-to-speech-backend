@@ -28,6 +28,7 @@ from app.pipeline.contracts import ASRState, MTState, TTSState
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
 from app.services.tts_service import TTSService
+from tests.conftest import speech_chunk
 from tests.test_pipeline import _read_segment
 
 # Largo comparado con el presupuesto de los 100 ms: si el loop quedara
@@ -87,7 +88,7 @@ def test_event_loop_stays_responsive_during_inference(ws_client, stage):
     with ws_client.websocket_connect(
         f"/pipeline/ws/{created['id']}", subprotocols=[created["ws_token"]]
     ) as ws:
-        ws.send_bytes(b"fake_audio_chunk")
+        ws.send_bytes(speech_chunk())
         assert entered.wait(timeout=5.0), "la inferencia nunca arranco"
 
         start = time.monotonic()

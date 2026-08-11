@@ -120,8 +120,16 @@ def test_getters_do_not_construct_without_lifespan(monkeypatch):
     monkeypatch.setattr(deps, "_asr_service", None)
     monkeypatch.setattr(deps, "_mt_service", None)
     monkeypatch.setattr(deps, "_tts_service", None)
+    # The segmenter is built by the same lifespan and read by the same kind of
+    # getter, so it is subject to the same rule: read, never construct.
+    monkeypatch.setattr(deps, "_segmenter", None)
 
-    for getter in (deps.get_asr_service, deps.get_mt_service, deps.get_tts_service):
+    for getter in (
+        deps.get_asr_service,
+        deps.get_mt_service,
+        deps.get_tts_service,
+        deps.get_segmenter,
+    ):
         results = _call_from_threads(getter)
         assert len(results) == THREADS
         for r in results:
@@ -139,6 +147,26 @@ def test_startup_fails_fast_when_an_engine_cannot_be_built(monkeypatch):
             raise RuntimeError("weights missing")
 
     monkeypatch.setattr(deps, "TTSService", BrokenTTSService)
+
+    entered = False
+    with pytest.raises(RuntimeError, match="weights missing"):
+        with TestClient(app):
+            entered = True
+    assert not entered, "startup must fail before the app body runs"
+
+
+def test_startup_fails_fast_when_the_vad_weights_are_missing(monkeypatch):
+    """Same rule for the segmenter, and a likelier failure than a missing GPU.
+
+    Its weights are a file vendored in the tree, so this breaks on a bad
+    checkout or a packaging step that drops non-Python files - and it must
+    break at boot, not on the first chunk of some user's session.
+    """
+
+    def missing():
+        raise RuntimeError("weights missing")
+
+    monkeypatch.setattr(deps, "build_segmenter", missing)
 
     entered = False
     with pytest.raises(RuntimeError, match="weights missing"):

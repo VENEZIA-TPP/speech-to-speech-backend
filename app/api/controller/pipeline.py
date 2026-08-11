@@ -18,6 +18,7 @@ from app.schemas.events import (
     TranscriptionCompleted,
     TranslationCompleted,
 )
+from app.schemas.translation import PipelineResult
 from app.services.translation_pipeline_service import TranslationPipelineService
 
 router = APIRouter()
@@ -25,6 +26,107 @@ router = APIRouter()
 
 async def _send(websocket: WebSocket, event: BaseModel) -> None:
     await websocket.send_json(event.model_dump())
+
+
+async def _emit_segment(websocket: WebSocket, result: PipelineResult) -> None:
+    """Send one segment's whole burst of events, and time it.
+
+    The end-to-end clock stops here, after the audio has been handed to the
+    transport, and started where the segmenter closed the segment - a
+    timestamp that travelled here on the result. It is anchored to the segment
+    rather than to the arrival of a binary frame because a frame can close
+    zero, one or several segments, and a segment closed by the end-of-session
+    flush arrives on no binary frame at all.
+
+    What it still cannot cover is how long the audio waited unread in the
+    socket buffer, or inside a chunk that had not been sent yet: nothing in the
+    ASGI interface reports when a frame arrived. This measures the server's
+    window, not the speaker's.
+    """
+    index = result.chunk_index
+
+    # Send failures (client gone mid-burst) must not mark the session FAILED -
+    # they fall through to the disconnect handling.
+    await _send(
+        websocket,
+        TranscriptionCompleted(
+            segment_index=index,
+            transcript=result.original_text,
+            language_code=result.detected_language,
+        ),
+    )
+    await _send(
+        websocket,
+        TranslationCompleted(
+            segment_index=index,
+            text=result.translated_text,
+            target_language=result.target_language,
+        ),
+    )
+    # None for a segment that carried no audio: there is no audio frame to stop
+    # the clock on, and a number covering some other boundary would not be the
+    # same measurement.
+    e2e_ms = None
+    if result.synthesized_audio:
+        await _send(
+            websocket,
+            AudioDelta(
+                segment_index=index,
+                seq=0,
+                size_bytes=len(result.synthesized_audio),
+            ),
+        )
+        await websocket.send_bytes(result.synthesized_audio)
+        e2e_ms = int((time.monotonic() - result.segment_started_at) * 1000)
+    # A segment with no audio frame gets no watermark claim either - nothing
+    # was applied to nothing. audio.done still closes the segment either way.
+    has_audio = bool(result.synthesized_audio)
+    await _send(
+        websocket,
+        AudioDone(
+            segment_index=index,
+            watermarked=has_audio and bool(result.watermarked),
+            watermark_method=result.watermark_method if has_audio else None,
+        ),
+    )
+    await _send(
+        websocket,
+        SegmentMetrics(
+            segment_index=index,
+            asr_ms=result.asr_processing_time_ms,
+            mt_ms=result.mt_processing_time_ms,
+            tts_ms=result.tts_processing_time_ms,
+            e2e_ms=e2e_ms,
+        ),
+    )
+
+
+async def _fail(
+    websocket: WebSocket,
+    pipeline_service: TranslationPipelineService,
+    session_id: int,
+    segment_index: int,
+    message: str,
+) -> None:
+    """Mark the session FAILED and tell the client, without raising again.
+
+    The suppress guards against fail_session()'s own write failing (a rollback
+    trip, a DB blip) escaping as a second exception, which would skip the error
+    event and, worse, leave the caller's status_decided False - making the
+    finally block try (and very possibly also fail) to mark the session
+    COMPLETED instead, the same stuck-ACTIVE failure shape already fixed twice
+    (79d3547, d8cd711).
+    """
+    with contextlib.suppress(Exception):
+        await pipeline_service.fail_session(session_id)
+    await _send(
+        websocket,
+        ErrorEvent(
+            code="pipeline_failed",
+            segment_index=segment_index,
+            message=message,
+        ),
+    )
 
 
 @router.websocket("/ws/{session_id}")
@@ -71,12 +173,11 @@ async def pipeline_websocket(
     # this is the only place per-session streaming state can live.
     state = SessionState()
 
-    # A segment is what the client is told about; today the pipeline closes one
-    # per chunk received, which is why this doubles as the chunk index the
-    # pipeline persists. Voice-driven segmentation breaks that equality, and
-    # the protocol already allows it to: nothing sent over the wire promises
-    # one segment per chunk.
-    segment_index = 0
+    # How many segments have gone out, for the session.completed tally only.
+    # The index each segment is announced under comes from the pipeline, which
+    # is what persists it: a chunk closes zero, one or several segments, so a
+    # counter kept here would be a second, independent count of the same thing.
+    segments_sent = 0
     # True once this handler has decided the session's terminal status, so the
     # cleanup below cannot overwrite a FAILED session with COMPLETED.
     status_decided = False
@@ -115,12 +216,33 @@ async def pipeline_websocket(
                     continue
 
                 if event_type == "input_audio.commit":
+                    # Flush before completing: a speaker who stops talking and
+                    # closes the stream leaves the last phrase still open in
+                    # the segmenter, and it is only ever emitted here. Skipping
+                    # this loses the final utterance of every session, with no
+                    # error and nothing missing-looking on the wire.
+                    try:
+                        flushed = await pipeline_service.flush(state, session_id)
+                    except Exception as exc:
+                        await _fail(
+                            websocket,
+                            pipeline_service,
+                            session_id,
+                            segments_sent,
+                            f"Pipeline error: {exc}",
+                        )
+                        status_decided = True
+                        break
+                    if flushed is not None:
+                        await _emit_segment(websocket, flushed)
+                        segments_sent += 1
+
                     await pipeline_service.complete_session(session_id)
                     status_decided = True
                     await _send(
                         websocket,
                         SessionCompleted(
-                            session_id=session_id, total_segments=segment_index
+                            session_id=session_id, total_segments=segments_sent
                         ),
                     )
                     break
@@ -139,17 +261,6 @@ async def pipeline_websocket(
 
             # Audio chunk (binary)
             if "bytes" in data:
-                # The end-to-end clock lives here and not in the pipeline: this
-                # is the only place that can see the persistence writes, the
-                # event serialization and the send itself. It starts where the
-                # handler first has the segment's audio in hand and stops once
-                # the segment's whole synthesized audio frame has been handed
-                # to the transport (send_bytes() returning only means uvicorn
-                # buffered it, not that the peer has it). What it cannot cover
-                # is how long the frame sat unread in the socket buffer -
-                # nothing in the ASGI interface reports when it arrived - so
-                # this measures the server's window, not the speaker's.
-                segment_start = time.monotonic()
                 if len(data["bytes"]) > settings.MAX_AUDIO_FRAME_BYTES:
                     # Status write happens-before the close signal, like every
                     # other terminal path below - a client that has observed
@@ -162,111 +273,43 @@ async def pipeline_websocket(
                     await websocket.close(code=1009)  # RFC 6455: message too big
                     break
                 try:
-                    result = await pipeline_service.process_audio_chunk(
+                    # Zero, one or several: the voice segmenter decides where
+                    # speech ends, so a chunk of silence closes nothing and a
+                    # chunk holding a real pause closes two.
+                    results = await pipeline_service.process_audio_chunk(
                         state,
                         session_id=session_id,
                         audio_bytes=data["bytes"],
-                        chunk_index=segment_index,
                     )
                 except ValueError as exc:
                     # Same terminal status as the except Exception branch below,
                     # for the same reason: a session that failed mid-chunk must
-                    # not be left for the finally block to mark COMPLETED. The
-                    # suppress guards against fail_session()'s own write failing
-                    # (a rollback trip, a DB blip) escaping as a second
-                    # exception, which would skip the error event below.
-                    with contextlib.suppress(Exception):
-                        await pipeline_service.fail_session(session_id)
-                    status_decided = True
-                    await _send(
+                    # not be left for the finally block to mark COMPLETED. This
+                    # also covers a frame that is not decodable audio, which the
+                    # segmenter rejects rather than treating as silence.
+                    await _fail(
                         websocket,
-                        ErrorEvent(
-                            code="pipeline_failed",
-                            segment_index=segment_index,
-                            message=str(exc),
-                        ),
+                        pipeline_service,
+                        session_id,
+                        segments_sent,
+                        str(exc),
                     )
+                    status_decided = True
                     break
                 except Exception as exc:
-                    # Mirrors the finally block's suppress on complete_session():
-                    # if fail_session()'s own write fails (its rollback trips, a
-                    # DB blip), that must not raise a second exception out of the
-                    # handler - that would skip the error event below and, worse,
-                    # leave status_decided False, making the finally block try
-                    # (and very possibly also fail) to mark the session COMPLETED
-                    # instead - the same stuck-ACTIVE failure shape already fixed
-                    # twice (79d3547, d8cd711).
-                    with contextlib.suppress(Exception):
-                        await pipeline_service.fail_session(session_id)
-                    status_decided = True
-                    await _send(
+                    await _fail(
                         websocket,
-                        ErrorEvent(
-                            code="pipeline_failed",
-                            segment_index=segment_index,
-                            message=f"Pipeline error: {exc}",
-                        ),
+                        pipeline_service,
+                        session_id,
+                        segments_sent,
+                        f"Pipeline error: {exc}",
                     )
+                    status_decided = True
                     break
 
-                index = segment_index
-                segment_index += 1
-
-                # Send failures (client gone mid-burst) must not mark the
-                # session FAILED - they fall through to the disconnect handling.
-                await _send(
-                    websocket,
-                    TranscriptionCompleted(
-                        segment_index=index,
-                        transcript=result.original_text,
-                        language_code=result.detected_language,
-                    ),
-                )
-                await _send(
-                    websocket,
-                    TranslationCompleted(
-                        segment_index=index,
-                        text=result.translated_text,
-                        target_language=result.target_language,
-                    ),
-                )
-                # None for a segment that carried no audio: there is no audio
-                # frame to stop the clock on, and a number covering some other
-                # boundary would not be the same measurement.
-                e2e_ms = None
-                if result.synthesized_audio:
-                    await _send(
-                        websocket,
-                        AudioDelta(
-                            segment_index=index,
-                            seq=0,
-                            size_bytes=len(result.synthesized_audio),
-                        ),
-                    )
-                    await websocket.send_bytes(result.synthesized_audio)
-                    e2e_ms = int((time.monotonic() - segment_start) * 1000)
-                # A segment with no audio frame gets no watermark claim either -
-                # nothing was applied to nothing. audio.done still closes the
-                # segment either way.
-                has_audio = bool(result.synthesized_audio)
-                await _send(
-                    websocket,
-                    AudioDone(
-                        segment_index=index,
-                        watermarked=has_audio and bool(result.watermarked),
-                        watermark_method=result.watermark_method if has_audio else None,
-                    ),
-                )
-                await _send(
-                    websocket,
-                    SegmentMetrics(
-                        segment_index=index,
-                        asr_ms=result.asr_processing_time_ms,
-                        mt_ms=result.mt_processing_time_ms,
-                        tts_ms=result.tts_processing_time_ms,
-                        e2e_ms=e2e_ms,
-                    ),
-                )
+                for result in results:
+                    await _emit_segment(websocket, result)
+                    segments_sent += 1
 
     except WebSocketDisconnect:
         pass

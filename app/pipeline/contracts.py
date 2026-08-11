@@ -16,6 +16,8 @@ See docs/adr/0003-workers-persistentes-y-estado-por-sesion.md.
 import hashlib
 from dataclasses import dataclass, field
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class SpeakerProfile:
@@ -114,6 +116,31 @@ class TTSState:
 
 
 @dataclass
+class VADState:
+    """Where the segmenter keeps its memory between chunks.
+
+    Lives here rather than next to the segmenter so contracts.py stays the one
+    place per-session state is declared, and so importing a contract does not
+    pull in the ONNX runtime.
+    """
+
+    # Silero's recurrent state and the 64-sample context window it needs.
+    # Allocated on first use so building a session costs nothing.
+    model_state: np.ndarray | None = None
+    context: np.ndarray | None = None
+    # Samples left over from the last chunk that did not fill a whole frame.
+    # Kept as decoded samples, not as re-encoded audio: two WAV blobs do not
+    # concatenate into one readable WAV.
+    residue: np.ndarray | None = None
+    triggered: bool = False
+    silence_frames: int = 0
+    active_frames: int = 0
+    segment: list[np.ndarray] = field(default_factory=list)
+    probs: list[float] = field(default_factory=list)
+    preroll: list[np.ndarray] = field(default_factory=list)
+
+
+@dataclass
 class SessionState:
     """Built by the WebSocket handler right after accept(), dies with the
     coroutine. There is no global session_id -> state map to index wrong.
@@ -122,3 +149,10 @@ class SessionState:
     asr: ASRState = field(default_factory=ASRState)
     mt: MTState = field(default_factory=MTState)
     tts: TTSState = field(default_factory=TTSState)
+    vad: VADState = field(default_factory=VADState)
+    # How many segments this session has emitted, and therefore the index the
+    # next one gets. It lives here rather than in the WebSocket handler because
+    # the pipeline is what persists it: a chunk can now close zero or several
+    # segments, so a counter kept by the caller and a counter written to the
+    # database would be two counters that only agree by luck.
+    segments_emitted: int = 0

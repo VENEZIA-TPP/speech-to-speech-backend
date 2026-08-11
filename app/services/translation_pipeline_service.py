@@ -1,27 +1,36 @@
 """
 Translation Pipeline Service - orchestrates the full ASR -> MT -> TTS pipeline.
 
-Flow per audio chunk:
-  1. Look up the active TranslationSession.
-  2. Run ASRService.transcribe() -> get text + detected language + latency.
-  3. Persist Transcription to DB.
-  4. Run MTService.translate() -> get translated text + latency.
-  5. Persist Translation to DB.
-  6. Run TTSService.synthesize() -> synthesized audio + watermark tag + latency
-     (TTS output is not persisted this delivery).
-  7. Return PipelineResult with the per-stage metrics + synthesized audio.
-     The end-to-end clock deliberately does NOT live here: measured from
-     inside this method it would miss the event serialization and the send,
-     which is how it came to underreport. It belongs to the WebSocket
-     handler, the only place that can see the whole window.
+The unit of work is a segment, not a chunk. An arriving chunk is fed to the
+voice segmenter, which decides where speech ends and hands back however many
+segments closed - zero, one or several. Each of those runs the pipeline:
 
-Per-session streaming state (buffer, previous prompt, decoder cache) travels in
-the SessionState the WebSocket handler builds at accept() time - never on an
-engine, which is frozen and shared process-wide across every session.
+  1. Run ASRService.transcribe() -> text + detected language + latency.
+  2. Persist Transcription.
+  3. Run MTService.translate() -> translated text + latency.
+  4. Persist Translation.
+  5. Run TTSService.synthesize() -> synthesized audio + watermark tag + latency
+     (TTS output is not persisted this delivery).
+  6. Return a PipelineResult per segment, carrying the segment's own capture
+     time. The end-to-end clock deliberately does NOT run here: measured from
+     inside this service it would miss the event serialization and the send,
+     which is how it came to underreport. This returns the anchor; the
+     WebSocket handler, the only place that can see the whole window, does the
+     subtraction.
+
+A chunk that closes no segment returns an empty list before touching the
+database or the ASR at all. That is the point of the whole change: silence used
+to run the full pipeline and persist an empty transcription every time.
+
+Per-session streaming state (segmenter memory, buffers, previous prompt,
+decoder cache) travels in the SessionState the WebSocket handler builds at
+accept() time - never on an engine, which is frozen and shared process-wide
+across every session.
 """
 
 from app.models.translation_session import SessionStatus
 from app.pipeline.contracts import SessionState
+from app.pipeline.vad import SpeechSegment, VoiceSegmenter
 from app.repositories.interfaces.translation_session_repository import (
     ITranslationSessionRepository,
 )
@@ -45,6 +54,7 @@ class TranslationPipelineService:
         asr_service: ASRService,
         mt_service: MTService,
         tts_service: TTSService,
+        segmenter: VoiceSegmenter,
     ):
         self.session_repo = session_repo
         self.transcription_repo = transcription_repo
@@ -52,28 +62,65 @@ class TranslationPipelineService:
         self.asr_service = asr_service
         self.mt_service = mt_service
         self.tts_service = tts_service
+        self.segmenter = segmenter
 
     async def process_audio_chunk(
         self,
         state: SessionState,
         session_id: int,
         audio_bytes: bytes,
-        chunk_index: int,
+    ) -> list[PipelineResult]:
+        """One arriving chunk in, one result per segment it closed out.
+
+        Returns an empty list for a chunk that closed nothing - silence, or
+        speech still in progress. Segmentation runs first precisely so that
+        case costs one VAD pass and nothing else: no session lookup, no
+        inference, no row.
+        """
+        segments = self.segmenter.feed(state.vad, audio_bytes)
+        if not segments:
+            return []
+        return [await self._run(state, session_id, s) for s in segments]
+
+    async def flush(
+        self, state: SessionState, session_id: int
+    ) -> PipelineResult | None:
+        """Close and process whatever speech was still open at session end.
+
+        Without this the last utterance of every session is lost. It is not a
+        rare path: it happens whenever a speaker stops talking and closes the
+        stream before the silence threshold elapses, which is the normal way a
+        session ends.
+        """
+        segment = self.segmenter.flush(state.vad)
+        if segment is None:
+            return None
+        return await self._run(state, session_id, segment)
+
+    async def _run(
+        self, state: SessionState, session_id: int, segment: SpeechSegment
     ) -> PipelineResult:
         session = await self.session_repo.get_by_id(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
 
+        # The index is taken from the session's own state rather than from a
+        # counter the caller keeps: a chunk can close several segments, so a
+        # caller-side counter and the one persisted here would be two counters
+        # that only agree by luck.
+        segment_index = state.segments_emitted
+        state.segments_emitted += 1
+
         # ASR
         asr_result = await self.asr_service.transcribe(
             state.asr,
-            audio_bytes=audio_bytes,
+            audio_bytes=segment.pcm,
             source_language=session.source_language,
         )
 
         transcription = await self.transcription_repo.create(
             session_id=session_id,
-            chunk_index=chunk_index,
+            chunk_index=segment_index,
             original_text=asr_result.text,
             detected_language=asr_result.detected_language,
             confidence=asr_result.confidence,
@@ -108,7 +155,7 @@ class TranslationPipelineService:
         audio = tts_result.audio
 
         return PipelineResult(
-            chunk_index=chunk_index,
+            chunk_index=segment_index,
             original_text=asr_result.text,
             translated_text=mt_result.translated_text,
             detected_language=asr_result.detected_language,
@@ -123,6 +170,7 @@ class TranslationPipelineService:
             watermarked=True,
             watermark_method=audio.method,
             synthesized_audio=audio.data,
+            segment_started_at=segment.t_capture,
         )
 
     async def authorize(self, session_id: int, token: str | None) -> bool:

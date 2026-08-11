@@ -15,6 +15,7 @@ from app.repositories.translation_session_repository import (
 )
 from app.repositories.transcription_repository import SQLAlchemyTranscriptionRepository
 from app.repositories.translation_repository import SQLAlchemyTranslationRepository
+from app.pipeline.vad import VoiceSegmenter, build_segmenter
 from app.services.asr_service import ASRService
 from app.services.mt_service import MTService
 from app.services.session_service import SessionService
@@ -47,6 +48,7 @@ def get_translation_repository(
 _asr_service: ASRService | None = None
 _mt_service: MTService | None = None
 _tts_service: TTSService | None = None
+_segmenter: VoiceSegmenter | None = None
 
 _NOT_BUILT = "engines not built: the lifespan did not run"
 
@@ -65,10 +67,11 @@ def init_engines() -> None:
     call site with `await anyio.to_thread.run_sync(init_engines)` -
     fail-fast still holds, the exception still propagates out.
     """
-    global _asr_service, _mt_service, _tts_service
+    global _asr_service, _mt_service, _tts_service, _segmenter
     _asr_service = ASRService(model_name=settings.ASR_MODEL, device=settings.ASR_DEVICE)
     _mt_service = MTService(model_name=settings.MT_MODEL, device=settings.MT_DEVICE)
     _tts_service = TTSService(model_name=settings.TTS_MODEL, device=settings.TTS_DEVICE)
+    _segmenter = build_segmenter()
 
 
 def get_asr_service() -> ASRService:
@@ -87,6 +90,12 @@ def get_tts_service() -> TTSService:
     if _tts_service is None:
         raise RuntimeError(_NOT_BUILT)
     return _tts_service
+
+
+def get_segmenter() -> VoiceSegmenter:
+    if _segmenter is None:
+        raise RuntimeError(_NOT_BUILT)
+    return _segmenter
 
 
 # Application services
@@ -127,6 +136,7 @@ def get_pipeline_service(
     asr_service: ASRService = Depends(get_asr_service),
     mt_service: MTService = Depends(get_mt_service),
     tts_service: TTSService = Depends(get_tts_service),
+    segmenter: VoiceSegmenter = Depends(get_segmenter),
 ) -> TranslationPipelineService:
     return TranslationPipelineService(
         session_repo=session_repo,
@@ -135,4 +145,5 @@ def get_pipeline_service(
         asr_service=asr_service,
         mt_service=mt_service,
         tts_service=tts_service,
+        segmenter=segmenter,
     )
