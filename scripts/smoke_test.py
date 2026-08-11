@@ -1,9 +1,11 @@
 """End-to-end smoke test against a running server (real Postgres, stub models).
 
 Creates a session over REST, streams synthetic WAV chunks over the WebSocket,
-and asserts the pipeline replies with a JSON result + a playable WAV frame per
-chunk. Complements tests/ (which runs in-process against SQLite) by exercising
-the real server, the real DB and a real WS client.
+and reads back the typed event stream: a transcription, a translation, a
+watermarked audio frame and its metrics per segment. Sends every chunk before
+reading any reply, because the protocol promises neither one segment per chunk
+nor a reply before the next send. Complements tests/ (which runs in-process
+against SQLite) by exercising the real server, the real DB and a real WS client.
 
 Usage (server must already be running):
     .venv/bin/python scripts/smoke_test.py
@@ -55,41 +57,61 @@ async def stream(session_id: int, token: str, audio: bytes) -> None:
     ws_url = f"{BASE_URL.replace('http', 'ws', 1)}/pipeline/ws/{session_id}"
 
     async with websockets.connect(ws_url, subprotocols=[token]) as ws:
-        for i in range(CHUNKS):
+        created = json.loads(await ws.recv())
+        assert created["type"] == "session.created", created
+
+        # Every chunk goes out before a single reply is read: the protocol
+        # does not promise one segment per chunk, nor a reply before the next
+        # send is allowed. The commit rides right behind them.
+        for _ in range(CHUNKS):
             await ws.send(audio)
+        await ws.send(json.dumps({"type": "input_audio.commit"}))
 
-            result = json.loads(await ws.recv())
-            assert "error" not in result, result
-            assert result["chunk_index"] == i, result
-            assert result["original_text"], result
-            assert result["translated_text"], result
-            # Rule #6: every synthesized output must carry a watermark tag.
-            assert result["watermarked"] is True, result
-            assert result["watermark_method"], result
+        segments: set[int] = set()
+        pending_audio: tuple[int, int] | None = None
 
-            print(
-                f"chunk {i}: {result['original_text']!r} -> "
-                f"{result['translated_text']!r} "
-                f"({result['total_processing_time_ms']} ms total)"
-            )
-
-            # Raw audio never rides inside the JSON - it comes as a separate frame.
-            assert result["synthesized_audio_size_bytes"] > 0, result
+        while True:
             frame = await ws.recv()
-            assert isinstance(frame, bytes), type(frame)
-            assert len(frame) == result["synthesized_audio_size_bytes"]
-            with wave.open(io.BytesIO(frame)) as out:
-                print(
-                    f"         audio {len(frame)} bytes, {out.getframerate()} Hz, "
-                    f"{out.getnchannels()} ch, "
-                    f"{out.getnframes() / out.getframerate():.2f}s"
-                )
 
-        await ws.send("END")
-        done = json.loads(await ws.recv())
-        assert done["status"] == "completed", done
-        assert done["total_chunks"] == CHUNKS, done
-        print(f"session {session_id} completed, {done['total_chunks']} chunks")
+            if isinstance(frame, bytes):
+                assert pending_audio is not None, "binary frame with no audio.delta"
+                index, size_bytes = pending_audio
+                assert len(frame) == size_bytes, (len(frame), size_bytes)
+                with wave.open(io.BytesIO(frame)) as out:
+                    print(
+                        f"         segment {index}: audio {len(frame)} bytes, "
+                        f"{out.getframerate()} Hz, {out.getnchannels()} ch, "
+                        f"{out.getnframes() / out.getframerate():.2f}s"
+                    )
+                pending_audio = None
+                continue
+
+            event = json.loads(frame)
+            assert event["type"] != "error", event
+            index = event.get("segment_index")
+
+            if event["type"] == "transcription.completed":
+                print(f"segment {index}: {event['transcript']!r}")
+            elif event["type"] == "translation.completed":
+                print(f"         -> {event['text']!r}")
+            elif event["type"] == "audio.delta":
+                pending_audio = (index, event["size_bytes"])
+            elif event["type"] == "audio.done":
+                # Rule #6: every synthesized output must carry a watermark tag.
+                assert event["watermarked"] is True, event
+                assert event["watermark_method"], event
+                segments.add(index)
+            elif event["type"] == "segment.metrics":
+                print(f"         {event['e2e_ms']} ms total")
+            elif event["type"] == "session.completed":
+                assert event["total_segments"] == len(segments), (event, segments)
+                print(
+                    f"session {session_id} completed, "
+                    f"{event['total_segments']} segments"
+                )
+                break
+
+        assert pending_audio is None, pending_audio
 
 
 def main() -> None:
