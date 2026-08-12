@@ -726,7 +726,8 @@ def test_ws_abrupt_disconnect_does_not_leave_session_active(ws_client, speech):
 
 
 def test_ws_error_then_abrupt_disconnect_keeps_failed(ws_client, speech):
-    """Un fallo del pipeline marca FAILED, y la desconexión no puede pisarlo con COMPLETED."""
+    """Un fallo del pipeline marca FAILED, y la desconexión no puede pisarlo
+    con COMPLETED."""
     from app.dependencies import get_tts_service
     from app.main import app
 
