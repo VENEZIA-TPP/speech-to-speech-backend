@@ -29,9 +29,7 @@ class TTSResult:
 
 @dataclass(frozen=True)
 class TTSService:
-    """Immutable and shared process-wide. See ASRService for the full rationale
-    (ADR 0003, barrier #1).
-    """
+    """Immutable and shared process-wide. See ASRService for the full rationale."""
 
     __slots__ = ("model_name", "device")
     model_name: str
