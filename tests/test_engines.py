@@ -44,8 +44,11 @@ def test_engine_subclass_is_frozen():
     class FakeParakeetASRService(ASRService):
         __slots__ = ()
 
-    engine = FakeParakeetASRService("parakeet-tdt-0.6b-v3", "cuda")
-    assert engine.model_name == "parakeet-tdt-0.6b-v3"
+    # "stub" rather than an invented backend name: the inherited __post_init__
+    # validates model_name and would refuse anything else - which is the
+    # behaviour a real subclassed backend inherits too.
+    engine = FakeParakeetASRService("stub", "cuda")
+    assert engine.model_name == "stub"
     with pytest.raises(FrozenInstanceError):
         engine.buffer = "leaked"
 
@@ -83,4 +86,6 @@ async def test_engine_holds_no_state_of_its_own():
     await asr.transcribe(ASRState(), b"bbb")
 
     assert not hasattr(asr, "__dict__")
-    assert type(asr).__slots__ == ("model_name", "device")
+    # _recognizer is the per-process model handle, filled once by
+    # __post_init__ - engine-lifetime state, not per-session state.
+    assert type(asr).__slots__ == ("model_name", "device", "_recognizer")
