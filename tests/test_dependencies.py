@@ -1,4 +1,4 @@
-"""Engines are built once, by the lifespan, and never by a getter (PR 5, C3/C8).
+"""Engines are built once, by the lifespan, and never by a getter.
 
 These tests need neither the DB nor the test client fixtures: TestClient(app)
 is used only as a way to run the lifespan.
@@ -33,8 +33,10 @@ def restore_engine_globals(monkeypatch):
 def _counting(cls, calls, key):
     """A plain subclass is fine for a test double: it only counts __init__.
 
-    (CLAUDE.md: a real backend must be @dataclass(frozen=True) with
-    __slots__ = (), but a plain subclass is the documented shape for doubles.)
+    A real backend must be a @dataclass(frozen=True) with __slots__ = ()
+    instead, because a plain subclass gets a __dict__ back and loses the
+    barrier against per-session state on the engine. A double that only
+    overrides methods never stores anything, so it does not need it.
     """
 
     class Counting(cls):
