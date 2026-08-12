@@ -159,6 +159,17 @@ make test         # or: pytest tests/ -v
 
 Each test uses an isolated SQLite in-memory database.
 
+### Checking it by hand
+
+The suite runs in-process against SQLite. Three tools exercise the real server
+instead:
+
+| Tool | What it is for |
+|---|---|
+| `scripts/consola.html` | Speak into the microphone from a browser and watch the WebSocket protocol live: transcription, translation, synthesized audio and per-segment metrics. Serve it (`cd scripts && python3 -m http.server 3000`) rather than opening the file directly — `http://localhost:3000` is an allowed CORS origin, a `file://` page is not. |
+| `scripts/smoke_test.py` | Non-interactive end-to-end run against a recorded fixture. What CI would use. |
+| `scripts/demo_vad.py` | Segmentation only, on your own recording. `--barrido` compares silence thresholds, which is how the endpoint threshold gets calibrated against a real speaker. |
+
 ---
 
 ## Running the real models
