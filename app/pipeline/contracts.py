@@ -99,8 +99,8 @@ class ASRState:
 @dataclass
 class MTState:
     """Nearly empty today, and that is the point: the signature tells whoever
-    integrates a real MT backend (PR 10) where per-session context goes, so the
-    per-process cache stops looking like the natural home.
+    integrates a real MT backend where per-session context goes, so the
+    per-process model cache stops looking like the natural home for it.
     """
 
     segments_seen: int = 0
