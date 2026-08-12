@@ -80,12 +80,13 @@ def test_engines_built_once(monkeypatch):
     # a mis-paired init_engines() (e.g. MT built with ASR_MODEL) would pass
     # the model_name assertions below undetected.
     #
-    # MT is the exception and has to be a name its backend selector accepts:
-    # MTService validates model_name at construction, so an invented one now
-    # kills the lifespan before this test gets to assert anything. What the
-    # test needs is that the three values differ from each other, and "stub"
-    # against "asr-x"/"tts-z" still gives that.
-    monkeypatch.setattr(settings, "ASR_MODEL", "asr-x")
+    # ASR and MT have to be names their backend selectors accept: both
+    # validate model_name at construction, so an invented value kills the
+    # lifespan before this test gets to assert anything. With the two of
+    # them pinned to "stub", telling an ASR/MT swap apart rides on the
+    # per-service devices below; "tts-z" stays invented (and distinct) until
+    # the TTS backend validates too.
+    monkeypatch.setattr(settings, "ASR_MODEL", "stub")
     monkeypatch.setattr(settings, "MT_MODEL", "stub")
     monkeypatch.setattr(settings, "TTS_MODEL", "tts-z")
     # Distinct per-service devices too: ASR_DEVICE/MT_DEVICE/TTS_DEVICE all

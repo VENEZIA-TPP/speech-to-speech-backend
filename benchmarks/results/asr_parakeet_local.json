@@ -1,0 +1,56 @@
+{
+  "measured_at": "2026-08-12T00:00:00+00:00",
+  "what": "Parakeet TDT 0.6B v3, int8 ONNX export, on CPU",
+  "evidence": "NOT evidence for this project. ASR targets a cloud GPU, so these numbers describe hardware that will not serve a request: they are a correctness check, not a latency result. Do not quote them in the report. The figure with a use beyond this file is load.per_process_ms, which decides whether engine construction has to leave the async lifespan.",
+  "machine": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "settings": {
+    "asr_model": "parakeet",
+    "asr_device": "cpu",
+    "artifact": "istupakov/parakeet-tdt-0.6b-v3-onnx@8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
+    "quantization": "int8",
+    "weights_on_disk_mb": 640,
+    "providers": ["CPUExecutionProvider"],
+    "preprocessor": "numpy (onnx-asr picks it when the first provider is CPU; nemo128.onnx is fetched anyway so a CUDA process can start offline)"
+  },
+  "load": {
+    "note": "Download excluded - paid once per machine. This is the cost of a process start, and the lifespan runs once per WebSocket test, not once per suite.",
+    "runs_ms": [756, 791, 748],
+    "per_process_ms": 756.0,
+    "mt_per_process_ms": 201.0,
+    "both_stages_ms": 957.0,
+    "lifespan_runs_per_suite": 25,
+    "projected_suite_overhead_ms": 18900.0,
+    "projected_suite_note": "Only paid if the suite is run with ASR_MODEL=parakeet. It runs with ASR_MODEL=stub, which loads nothing.",
+    "async_lifespan_decision": "init_engines() stays synchronous. Its docstring sets the trigger for wrapping the call site in to_thread.run_sync at 30-90 s of blocking load; both real stages together cost ~1 s here, which stalls no startup probe and no SIGTERM. Re-measure on the target GPU - a CUDA execution provider builds its context at session creation and is the case that could cross the threshold."
+  },
+  "transcribe": {
+    "input": "tests/fixtures/es_sistema.wav - 1.82 s of synthesized Spanish",
+    "output": "El sistema funciona correctamente.",
+    "first_call_ms": 71.0,
+    "runs_ms": [58, 59, 55, 55, 57],
+    "median_ms": 57.0,
+    "via_service_ms": 56.0,
+    "note": "Median over a warm session. The first call is slower because ONNX Runtime allocates its arenas on it."
+  },
+  "broken_input_probe": {
+    "why": "Run deliberately, because the failure mode of this layer is silent: the VAD returns ~0 for every frame without its context window, and the MT decoder runs away without its terminator. Neither raises. The question was which wrong input this stage answers wrongly but plausibly.",
+    "unscaled_int16": {
+      "input": "raw int16 sample values cast to float32, never divided by full scale",
+      "output": "El sistema funciona correctamente.",
+      "median_ms": 56.0,
+      "finding": "IDENTICAL to the correct output. The mel preprocessor normalizes amplitude away, so this scaling is not load-bearing for this model. It only emits a RuntimeWarning about an overflowing cast. A test guarding it would guard nothing."
+    },
+    "garbage_float32": {
+      "input": "the WAV's byte payload reinterpreted as float32",
+      "output_head": "<unk><unk><unk><unk><unk>",
+      "output_tokens": 120,
+      "output_chars": 600,
+      "median_ms": 49.0,
+      "finding": "120 repeated <unk> with no separators. A word count does not catch it - the whole run splits as one token - so the opt-in test asserts on content words and bounds output length in CHARACTERS."
+    }
+  }
+}

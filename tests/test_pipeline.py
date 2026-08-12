@@ -31,7 +31,10 @@ async def test_asr_stub_returns_result():
 
     assert result.text
     assert result.detected_language == "en"
-    assert result.confidence is not None
+    # None on purpose: the stub used to answer a hardcoded 0.95 that was
+    # persisted as if it measured something, and the real backend has no
+    # honest score to report either.
+    assert result.confidence is None
     assert result.processing_time_ms >= 0
 
 
@@ -82,14 +85,34 @@ async def test_tts_stub_output_is_watermark_tagged():
 
 
 # Integration tests - pipeline via HTTP + DB (stub services)
-async def test_health_endpoint(client: AsyncClient):
+async def test_health_reports_the_mounted_backends(client: AsyncClient):
+    """/health/ must reflect the engines actually mounted, not a constant.
+
+    Three doubles with distinct names, because asserting "stub" cannot fail
+    on a re-hardcoded handler: this endpoint spent its whole life answering
+    three literal "stub" strings, and kept doing so after the MT backend
+    turned real. Overriding the getters also keeps the test independent of
+    whether some earlier test already ran the lifespan - the `client`
+    fixture itself never does.
+    """
+    from types import SimpleNamespace
+
+    from app.dependencies import get_asr_service, get_mt_service, get_tts_service
+    from app.main import app
+
+    names = {"asr": "asr-real", "mt": "mt-real", "tts": "tts-real"}
+    for getter, name in (
+        (get_asr_service, names["asr"]),
+        (get_mt_service, names["mt"]),
+        (get_tts_service, names["tts"]),
+    ):
+        app.dependency_overrides[getter] = lambda name=name: SimpleNamespace(
+            model_name=name
+        )
+
     response = await client.get("/health/")
     assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "ok"
-    assert "asr" in data["services"]
-    assert "mt" in data["services"]
-    assert "tts" in data["services"]
+    assert response.json() == {"status": "ok", "services": names}
 
 
 async def _build_pipeline(db_session):

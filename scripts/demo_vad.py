@@ -1,7 +1,9 @@
 """Probar la segmentación por voz con tu propia grabación.
 
-Es la única etapa del pipeline que hoy es real, así que es la única que tiene
-sentido probar con voz propia: ASR, MT y TTS son stubs y devuelven texto fijo.
+Este script se concentra en **dónde corta** el segmentador, que es lo que
+`--barrido` permite calibrar y ninguna otra herramienta muestra. Para ver la
+transcripción y la traducción de tu propia voz, `scripts/consola.html` habla el
+protocolo completo desde el navegador.
 
     # 1. Grabá con QuickTime Player (Archivo > Nueva grabación de audio) o con
     #    Notas de Voz, y exportá el archivo. Cualquier formato sirve.

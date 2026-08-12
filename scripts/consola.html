@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consola de pipeline</title>
+<link rel="icon" href="data:,">
+
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1a1a19; --dim: #6b6b68; --line: #e0e0dc;
+    --card: #ffffff; --accent: #2f6f4f; --warn: #9a6b1f; --err: #a33; --code: #f2f2ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #e8e8e4; --dim: #9a9a95; --line: #2c2e33;
+      --card: #1d1f23; --accent: #6fbf95; --warn: #d9a441; --err: #e08585; --code: #232529;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); font-size: .875rem; margin: 0 0 1.25rem; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 1rem; margin: 0 0 1rem; background: var(--card); }
+  legend { padding: 0 .4rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+  label { display: block; font-size: .8rem; color: var(--dim); margin-bottom: .2rem; }
+  input, select { width: 100%; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 6px;
+                  background: var(--bg); color: var(--fg); font: inherit; font-size: .9rem; }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; }
+  .row > div { flex: 1 1 10rem; }
+  button { font: inherit; padding: .55rem 1rem; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--card); color: var(--fg); cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  button.rec { background: var(--err); border-color: var(--err); color: #fff; font-weight: 600; }
+  .bar { height: 6px; background: var(--code); border-radius: 3px; overflow: hidden; margin-top: .6rem; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .08s linear; }
+  .status { font-size: .85rem; color: var(--dim); margin-top: .6rem; min-height: 1.3em; }
+  .seg { border: 1px solid var(--line); border-radius: 8px; padding: .85rem 1rem; margin-bottom: .75rem; background: var(--card); }
+  .seg h3 { margin: 0 0 .5rem; font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; }
+  .es { font-size: 1.05rem; }
+  .en { font-size: 1.05rem; color: var(--accent); margin-top: .2rem; }
+  .meta { font-size: .78rem; color: var(--dim); margin-top: .55rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; background: var(--code); padding: .1em .35em; border-radius: 3px; }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem;
+         max-height: 17rem; overflow-y: auto; background: var(--code); border-radius: 6px; padding: .6rem .75rem; }
+  #log div { white-space: pre-wrap; word-break: break-all; padding: .08rem 0; }
+  .t-err { color: var(--err); font-weight: 600; }
+  .t-bin { color: var(--warn); }
+  .t-tx, .t-tr { color: var(--accent); }
+  .note { font-size: .82rem; color: var(--dim); border-left: 2px solid var(--warn); padding-left: .7rem; margin: .75rem 0 0; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Consola de pipeline</h1>
+  <p class="sub">Habla al micrófono y mirá el protocolo WebSocket en vivo: transcripción, traducción, audio y métricas por segmento.</p>
+
+  <fieldset>
+    <legend>1 · Sesión</legend>
+    <div class="row">
+      <div><label for="base">Servidor</label><input id="base" value="http://127.0.0.1:8000"></div>
+      <div><label for="src">Idioma de origen</label>
+        <select id="src"><option value="es" selected>es</option><option value="en">en</option></select></div>
+      <div><label for="tgt">Idioma destino</label>
+        <select id="tgt"><option value="en" selected>en</option><option value="es">es</option></select></div>
+    </div>
+    <div style="margin-top:.85rem"><button id="crear" class="primary">Crear sesión</button></div>
+    <div id="sesion-info" class="status"></div>
+
+    <div id="manual" class="hidden">
+      <p class="note">Si el navegador bloqueó la creación por CORS, creá la sesión desde
+        <code>/docs</code> (o con curl) y pegá los datos acá. El WebSocket no pasa por CORS, así que
+        con esto funciona igual.</p>
+      <div class="row" style="margin-top:.6rem">
+        <div><label for="mid">session_id</label><input id="mid" inputmode="numeric" placeholder="24"></div>
+        <div style="flex:2 1 20rem"><label for="mtok">ws_token</label><input id="mtok" placeholder="Wv6KBJ..."></div>
+      </div>
+      <div style="margin-top:.6rem"><button id="usar">Usar estos datos</button></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>2 · Hablar</legend>
+    <button id="rec" class="primary" disabled>Empezar a grabar</button>
+    <div class="bar"><i id="nivel"></i></div>
+    <div id="estado" class="status">Creá una sesión para habilitar el micrófono.</div>
+    <p class="note">El servidor corta donde vos dejás de hablar, no cada N segundos: hacé una pausa
+      clara entre frases y vas a ver aparecer un segmento por frase. Una frase muy corta puede
+      descartarse por diseño.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>3 · Segmentos</legend>
+    <div id="segmentos"><p class="status" style="margin:0">Todavía no cerró ningún segmento.</p></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>4 · Eventos crudos</legend>
+    <div id="log"><div class="status">—</div></div>
+  </fieldset>
+</main>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+const RATE = 16000;
+const CHUNK_MS = 1000;          // cuánto audio va en cada frame binario
+
+let sesion = null;              // {id, token}
+let ws = null, ctx = null, stream = null, node = null, source = null;
+let cola = [];                  // Float32Array pendientes de mandar
+let colaLen = 0, grabando = false, pendiente = null, segmentos = 0;
+
+// ---------- log ----------
+const CLASES = {
+  "transcription.completed": "t-tx", "translation.completed": "t-tr",
+  "error": "t-err", "binario": "t-bin"
+};
+function log(texto, clase) {
+  const cont = $("log");
+  if (cont.firstElementChild?.classList.contains("status")) cont.innerHTML = "";
+  const d = document.createElement("div");
+  if (clase) d.className = clase;
+  d.textContent = new Date().toLocaleTimeString("es") + "  " + texto;
+  cont.appendChild(d);
+  cont.scrollTop = cont.scrollHeight;
+}
+
+// ---------- sesión ----------
+$("crear").onclick = async () => {
+  const base = $("base").value.replace(/\/$/, "");
+  $("crear").disabled = true;
+  $("sesion-info").textContent = "Creando…";
+  try {
+    const r = await fetch(base + "/sessions/", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({source_language: $("src").value, target_language: $("tgt").value})
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status + " — " + (await r.text()).slice(0, 200));
+    const s = await r.json();
+    activar(s.id, s.ws_token);
+  } catch (e) {
+    $("sesion-info").innerHTML = "<span class='t-err'>No se pudo crear: " + e.message + "</span>";
+    $("manual").classList.remove("hidden");
+    log("fetch falló: " + e.message, "t-err");
+  } finally {
+    $("crear").disabled = false;
+  }
+};
+
+$("usar").onclick = () => {
+  const id = parseInt($("mid").value, 10), tok = $("mtok").value.trim();
+  if (!id || !tok) { $("sesion-info").textContent = "Faltan session_id o ws_token."; return; }
+  activar(id, tok);
+};
+
+function activar(id, token) {
+  sesion = {id, token};
+  $("sesion-info").innerHTML = "Sesión <code>" + id + "</code> lista. El token no se vuelve a mostrar en ningún otro lado.";
+  $("rec").disabled = false;
+  $("estado").textContent = "Listo para grabar.";
+  log("sesión " + id + " creada");
+}
+
+// ---------- WAV ----------
+function aWav(f32, rate) {
+  const n = f32.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const txt = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  txt(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); txt(8, "WAVE");
+  txt(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  txt(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0, off = 44; i < n; i++, off += 2) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
+}
+
+// Remuestreo lineal, sólo si el navegador no dio 16 kHz (Safari a veces ignora el pedido).
+function remuestrear(f32, desde, hasta) {
+  if (desde === hasta) return f32;
+  const ratio = desde / hasta, out = new Float32Array(Math.floor(f32.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i * ratio, j = Math.floor(pos), frac = pos - j;
+    out[i] = f32[j] * (1 - frac) + (f32[j + 1] ?? f32[j]) * frac;
+  }
+  return out;
+}
+
+function enviarChunk() {
+  if (!colaLen || ws?.readyState !== WebSocket.OPEN) return;
+  const junto = new Float32Array(colaLen);
+  let off = 0;
+  for (const b of cola) { junto.set(b, off); off += b.length; }
+  cola = []; colaLen = 0;
+  const wav = aWav(junto, RATE);
+  ws.send(wav);
+  log("→ frame binario de " + wav.byteLength + " bytes (" + (junto.length / RATE).toFixed(2) + " s)", "t-bin");
+}
+
+// ---------- grabar ----------
+$("rec").onclick = () => grabando ? detener() : arrancar();
+
+async function arrancar() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}
+    });
+  } catch (e) {
+    $("estado").innerHTML = "<span class='t-err'>Sin acceso al micrófono: " + e.message + "</span>";
+    return;
+  }
+
+  ctx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: RATE});
+  if (ctx.sampleRate !== RATE) log("el navegador dio " + ctx.sampleRate + " Hz; se remuestrea a " + RATE, "t-bin");
+
+  await abrirWs();
+
+  source = ctx.createMediaStreamSource(stream);
+  node = ctx.createScriptProcessor(4096, 1, 1);
+  const porChunk = RATE * CHUNK_MS / 1000;
+
+  node.onaudioprocess = ev => {
+    if (!grabando) return;
+    const inp = ev.inputBuffer.getChannelData(0);
+    let suma = 0;
+    for (let i = 0; i < inp.length; i++) suma += inp[i] * inp[i];
+    $("nivel").style.width = Math.min(100, Math.sqrt(suma / inp.length) * 320) + "%";
+    const muestras = remuestrear(new Float32Array(inp), ctx.sampleRate, RATE);
+    cola.push(muestras); colaLen += muestras.length;
+    if (colaLen >= porChunk) enviarChunk();
+  };
+  source.connect(node); node.connect(ctx.destination);
+
+  grabando = true;
+  $("rec").textContent = "Terminar y cerrar la sesión";
+  $("rec").className = "rec";
+  $("estado").textContent = "Grabando. Hablá y hacé una pausa clara al terminar cada frase.";
+}
+
+function abrirWs() {
+  return new Promise((resolve, reject) => {
+    const base = $("base").value.replace(/\/$/, "").replace(/^http/, "ws");
+    // El token va como subprotocolo: es lo único que la API nativa de WebSocket
+    // deja mandar en el handshake, y no queda en los logs de acceso.
+    ws = new WebSocket(base + "/pipeline/ws/" + sesion.id, [sesion.token]);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { log("websocket abierto"); resolve(); };
+    ws.onerror = () => { log("error de websocket", "t-err"); reject(new Error("ws")); };
+    ws.onmessage = recibir;
+    ws.onclose = ev => {
+      log("websocket cerrado, código " + ev.code +
+          (ev.code === 4401 ? " (token inválido o sesión desconocida)" :
+           ev.code === 1009 ? " (frame demasiado grande)" : ""),
+          ev.code === 1000 ? null : "t-err");
+      if (grabando) detener(true);
+    };
+  });
+}
+
+function detener(soloUi) {
+  grabando = false;
+  $("nivel").style.width = "0";
+  $("rec").textContent = "Empezar a grabar";
+  $("rec").className = "primary";
+  $("rec").disabled = true;
+  $("estado").textContent = "Cerrando la sesión…";
+
+  if (!soloUi && ws?.readyState === WebSocket.OPEN) {
+    enviarChunk();                                        // lo que quede sin mandar
+    ws.send(JSON.stringify({type: "input_audio.commit"})); // cierra la última frase abierta
+    log("→ input_audio.commit");
+  }
+  node?.disconnect(); source?.disconnect();
+  stream?.getTracks().forEach(t => t.stop());
+  ctx?.close();
+}
+
+// ---------- recibir ----------
+function recibir(ev) {
+  if (ev.data instanceof ArrayBuffer) {
+    if (!pendiente) { log("frame binario sin audio.delta previo", "t-err"); return; }
+    const {index, size} = pendiente; pendiente = null;
+    const ok = ev.data.byteLength === size;
+    log("← audio del segmento " + index + ": " + ev.data.byteLength + " bytes" +
+        (ok ? "" : " (¡no coincide con size_bytes=" + size + "!)"), ok ? "t-bin" : "t-err");
+    const url = URL.createObjectURL(new Blob([ev.data], {type: "audio/wav"}));
+    const b = document.createElement("button");
+    b.textContent = "▶ reproducir";
+    b.onclick = () => new Audio(url).play();
+    tarjeta(index).querySelector(".audio").replaceChildren(
+      b, Object.assign(document.createElement("span"),
+        {textContent: " " + ev.data.byteLength + " bytes · silencio, el TTS todavía es un stub",
+         style: "color:var(--dim)"})
+    );
+    return;
+  }
+
+  const e = JSON.parse(ev.data);
+  log("← " + ev.data, CLASES[e.type]);
+  const t = e.segment_index != null ? tarjeta(e.segment_index) : null;
+
+  switch (e.type) {
+    case "transcription.completed":
+      t.querySelector(".es").textContent = e.transcript;
+      t.querySelector(".idioma").textContent = e.language_code ?? "—";
+      break;
+    case "translation.completed":
+      t.querySelector(".en").textContent = e.text;
+      break;
+    case "audio.delta":
+      pendiente = {index: e.segment_index, size: e.size_bytes};
+      break;
+    case "audio.done":
+      t.querySelector(".wm").textContent = e.watermarked ? ("marcado: " + e.watermark_method) : "sin marca";
+      break;
+    case "segment.metrics":
+      t.querySelector(".metricas").textContent =
+        `asr ${e.asr_ms} ms · mt ${e.mt_ms} ms · tts ${e.tts_ms} ms · servidor ${e.e2e_ms} ms`;
+      break;
+    case "session.completed":
+      $("estado").textContent = "Sesión " + e.session_id + " completada: " + e.total_segments + " segmento(s).";
+      break;
+    case "error":
+      $("estado").innerHTML = "<span class='t-err'>error " + e.code + ": " + e.message + "</span>";
+      break;
+  }
+}
+
+function tarjeta(i) {
+  let el = document.getElementById("seg-" + i);
+  if (el) return el;
+  if (!segmentos++) $("segmentos").innerHTML = "";
+  el = document.createElement("div");
+  el.className = "seg"; el.id = "seg-" + i;
+  el.innerHTML =
+    '<h3>segmento ' + i + '</h3>' +
+    '<div class="es">…</div><div class="en">…</div>' +
+    '<div class="meta"><span>idioma: <span class="idioma">—</span></span>' +
+    '<span class="wm"></span><span class="metricas"></span></div>' +
+    '<div class="meta audio"></div>';
+  $("segmentos").appendChild(el);
+  return el;
+}
+</script>
+</body>
+</html>
