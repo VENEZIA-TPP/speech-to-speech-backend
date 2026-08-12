@@ -1,6 +1,8 @@
 # Speech-to-Speech Translation - Backend
 
-Real-time speech translation pipeline: **ASR -> MT -> TTS** (all stages stubbed).
+Real-time speech translation pipeline: **ASR -> MT -> TTS**. ASR and MT have
+real backends behind env vars (`ASR_MODEL=parakeet`, `MT_MODEL=opus-mt`); every
+stage keeps a `stub` backend, which is still the default for all three.
 
 TPP - Ingeniería en Informática, FIUBA.  
 Authors: Victor Cipriano (106593) · Ricardo Contreras (107239)
@@ -13,9 +15,9 @@ Authors: Victor Cipriano (106593) · Ricardo Contreras (107239)
 |-------|-----------|
 | Web framework | FastAPI (async) + WebSocket |
 | Database | PostgreSQL 15 + SQLAlchemy 2 async + Alembic |
-| ASR | Whisper / faster-whisper *(stub for now)* |
-| MT | MarianMT / NLLB-200 *(stub for now)* |
-| TTS | XTTS v2 / OpenVoice V2 / Chatterbox *(stub for now)* |
+| ASR | Parakeet TDT 0.6B v3 via onnx-asr *(`stub` by default)* |
+| MT | OPUS-MT es↔en via CTranslate2 *(`stub` by default)* |
+| TTS | Chatterbox Multilingual planned *(stub for now)* |
 | Testing | pytest + pytest-asyncio + SQLite in-memory |
 | Container | Docker + Docker Compose |
 
@@ -49,8 +51,8 @@ app/
 │   ├── transcription_repository.py
 │   └── translation_repository.py
 ├── services/
-│   ├── asr_service.py                     # Whisper stub -> replace with real model
-│   ├── mt_service.py                      # MarianMT/NLLB stub -> replace with real model
+│   ├── asr_service.py                     # Parakeet via onnx-asr (or stub)
+│   ├── mt_service.py                      # OPUS-MT via CTranslate2 (or stub)
 │   ├── session_service.py                 # session CRUD + history queries
 │   ├── translation_pipeline_service.py   # ASR -> MT -> TTS orchestrator
 │   └── tts_service.py                     # TTS stub -> replace with real model
@@ -159,23 +161,22 @@ Each test uses an isolated SQLite in-memory database.
 
 ---
 
-## Integrating a real ASR model
+## Running the real models
 
-1. Install: `pip install faster-whisper`
-2. In [app/services/asr_service.py](app/services/asr_service.py) replace `_transcribe()` with faster-whisper inference.
-3. Set `ASR_MODEL=whisper-base` (or larger) and `ASR_DEVICE=cuda` in `.env`.
+- **ASR**: set `ASR_MODEL=parakeet`. First startup downloads the pinned int8
+  ONNX export of Parakeet TDT 0.6B v3 (~650 MB, cached by `huggingface_hub`);
+  the process refuses to start if the weights cannot be fetched. An
+  unrecognized value also refuses to start instead of silently falling back
+  to the stub.
+- **MT**: set `MT_MODEL=opus-mt`. Downloads one pinned CTranslate2 model per
+  pair in `SUPPORTED_LANGUAGE_PAIRS` (~155 MB each). Same startup semantics.
+- **TTS**: still a stub. The ratified candidate is Chatterbox Multilingual; a
+  real `_synthesize()` must keep the `_apply_watermark()` hook in the output
+  path (ethical requirement).
 
-## Integrating a real MT model
-
-1. Install: `pip install transformers sentencepiece`
-2. In [app/services/mt_service.py](app/services/mt_service.py) replace `_translate()` with MarianMT or NLLB-200 inference.
-3. Set `MT_MODEL=Helsinki-NLP/opus-mt-en-es` in `.env`.
-
-## Integrating a real TTS model
-
-1. Model TBD (XTTS v2 / OpenVoice V2 / Chatterbox candidates).
-2. In [app/services/tts_service.py](app/services/tts_service.py) replace `_synthesize()` with real inference; keep the `_apply_watermark()` hook in the output path (ethical requirement).
-3. Set `TTS_MODEL=...` and `TTS_DEVICE=cuda` in `.env`.
+`ASR_DEVICE`/`MT_DEVICE`/`TTS_DEVICE` accept `cpu` (default) or `cuda`. CPU
+runs the same code path as production and is correctness-only: latency numbers
+measured without the target GPU are not evidence.
 
 ---
 
@@ -196,18 +197,34 @@ HOST=0.0.0.0
 PUBLIC_URL=http://localhost:8000
 
 # ASR
-ASR_MODEL=stub        # whisper-base | whisper-small | whisper-medium | whisper-large-v3
+ASR_MODEL=stub        # stub | parakeet
 ASR_DEVICE=cpu        # cuda for GPU
 
 # MT
-MT_MODEL=stub         # Helsinki-NLP/opus-mt-en-es | facebook/nllb-200-distilled-600M
+MT_MODEL=stub         # stub | opus-mt
 MT_DEVICE=cpu
 
 # TTS
-TTS_MODEL=stub        # XTTS v2 | OpenVoice V2 | Chatterbox (model TBD)
+TTS_MODEL=stub        # stub (Chatterbox planned)
 TTS_DEVICE=cpu
 
 # Audio
 AUDIO_SAMPLE_RATE=16000
 AUDIO_CHUNK_DURATION_MS=3000
 ```
+
+---
+
+## Model licenses & attribution
+
+| Stage | Model | License | Artifact served |
+|-------|-------|---------|-----------------|
+| ASR | [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) © NVIDIA | **CC-BY-4.0** | ONNX export [`istupakov/parakeet-tdt-0.6b-v3-onnx`](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), pinned by commit |
+| MT | [OPUS-MT es-en / en-es](https://huggingface.co/Helsinki-NLP/opus-mt-es-en) by Helsinki-NLP | Apache-2.0 | CTranslate2 conversions [`michaelfeil/ct2fast-opus-mt-{es-en,en-es}`](https://huggingface.co/michaelfeil/ct2fast-opus-mt-es-en), pinned by commit |
+| VAD | [Silero VAD](https://github.com/snakers4/silero-vad) | MIT | ONNX weights vendored under `app/pipeline/weights/` |
+
+The ASR weights are NVIDIA's Parakeet TDT 0.6B v3, used under the
+[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license; this notice
+is the attribution that license requires. The runtime loads a third-party ONNX
+conversion of those weights (by [@istupakov](https://huggingface.co/istupakov),
+same license), pinned by commit SHA in `app/services/asr_service.py`.
