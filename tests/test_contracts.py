@@ -35,8 +35,9 @@ def test_watermarked_audio_rejects_empty_data():
 def test_watermarked_audio_sha256_is_derived_from_its_bytes():
     """sha256 is a property, not a field: it cannot be declared, only computed.
 
-    PR 12 persists this value and asserts it against the bytes the client
-    received; that assertion is only worth anything if the hash cannot lie.
+    Persisting this value and asserting it against the bytes the client
+    received is what would prove a given output was tagged, and that assertion
+    is only worth anything if the hash cannot lie.
     """
     audio = WatermarkedAudio(
         data=b"RIFFdata", sample_rate=16000, duration_ms=300, method="stub"
@@ -77,7 +78,7 @@ def test_session_state_substates_are_not_shared_between_sessions():
 
 def test_tts_state_starts_without_a_speaker():
     """No sealed sample yet means the default voice - explicit degradation.
-    The capture itself lands in PR 12."""
+    Nothing captures a sample yet; the contract exists ahead of the capture."""
     assert TTSState().speaker is None
 
 

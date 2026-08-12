@@ -42,8 +42,9 @@ class TTSService:
         language: str,
     ) -> TTSResult:
         # No speaker parameter: the voice sample is state.speaker, sealed once
-        # per session by the segmenter (PR 12). Passing the current audio chunk
-        # as a speaker reference - the Fase 0 bug - is no longer expressible.
+        # per session by the segmenter. Passing the current audio chunk as a
+        # speaker reference - which this pipeline once did, cloning whoever
+        # spoke last instead of a stable voice - is no longer expressible.
         start = time.monotonic()
         raw = await to_thread.run_sync(
             self._synthesize, state, text, language, limiter=_LIMITER
