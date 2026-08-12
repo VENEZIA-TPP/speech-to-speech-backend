@@ -9,8 +9,6 @@ Two kinds of object live here, with deliberately opposite properties:
     safe to hand across sessions.
   - Per-session state (ASRState, MTState, TTSState, SessionState): mutable,
     exactly one per WebSocket connection, and never an attribute of an engine.
-
-See docs/adr/0003-workers-persistentes-y-estado-por-sesion.md.
 """
 
 import hashlib
@@ -23,7 +21,7 @@ import numpy as np
 class SpeakerProfile:
     """A sealed voice sample for cloning. Sealed = no later chunk overwrites it.
 
-    The segmenter captures it in PR 12; PR 4 only defines the type, so that raw
+    Nothing captures one yet: the type exists ahead of the capture so that raw
     chunk bytes stop being a valid speaker reference anywhere in the pipeline.
     """
 
@@ -73,8 +71,8 @@ class WatermarkedAudio:
     @property
     def sha256(self) -> str:
         """Derived, never a field: a field can be filled with the hash of some
-        other audio, a property cannot. PR 12 persists this to prove after the
-        fact that a given output was tagged.
+        other audio, a property cannot. Persisting it is what would let anyone
+        prove after the fact that a given output was tagged; nothing does yet.
         """
         # Recomputed per call - hashing 300 ms of PCM is microseconds.
         # Cache it only if a profile ever says to.
@@ -99,8 +97,8 @@ class ASRState:
 @dataclass
 class MTState:
     """Nearly empty today, and that is the point: the signature tells whoever
-    integrates a real MT backend (PR 10) where per-session context goes, so the
-    per-process cache stops looking like the natural home.
+    integrates a real MT backend where per-session context goes, so the
+    per-process model cache stops looking like the natural home for it.
     """
 
     segments_seen: int = 0
@@ -108,8 +106,9 @@ class MTState:
 
 @dataclass
 class TTSState:
-    """speaker is None until the segmenter seals a sample (PR 12). None means
-    the default voice: explicit degradation, never silent cloning.
+    """speaker is None until the segmenter seals a sample, which nothing does
+    yet. None means the default voice: explicit degradation, never silent
+    cloning.
     """
 
     speaker: SpeakerProfile | None = None

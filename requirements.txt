@@ -18,6 +18,16 @@ alembic
 # extra.
 onnxruntime
 
+# Machine translation
+# OPUS-MT runs on CTranslate2, whose only dependencies are numpy and pyyaml -
+# no torch on the inference path. The published conversions ship source.spm and
+# target.spm, so tokenization needs sentencepiece alone rather than
+# transformers, and huggingface_hub is what fetches the pinned revisions.
+# MT_MODEL=stub imports none of the three: the loader imports inside itself.
+ctranslate2
+sentencepiece
+huggingface_hub
+
 # Config & validation
 pydantic
 pydantic-settings
@@ -27,6 +37,9 @@ python-dotenv
 # Testing
 pytest
 pytest-asyncio
+# A WebSocket test that stops receiving what it waits for does not fail: it
+# hangs the suite forever, and says nothing about which test it was.
+pytest-timeout
 httpx
 aiosqlite
 

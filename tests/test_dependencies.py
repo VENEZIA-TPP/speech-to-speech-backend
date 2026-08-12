@@ -1,4 +1,4 @@
-"""Engines are built once, by the lifespan, and never by a getter (PR 5, C3/C8).
+"""Engines are built once, by the lifespan, and never by a getter.
 
 These tests need neither the DB nor the test client fixtures: TestClient(app)
 is used only as a way to run the lifespan.
@@ -33,8 +33,10 @@ def restore_engine_globals(monkeypatch):
 def _counting(cls, calls, key):
     """A plain subclass is fine for a test double: it only counts __init__.
 
-    (CLAUDE.md: a real backend must be @dataclass(frozen=True) with
-    __slots__ = (), but a plain subclass is the documented shape for doubles.)
+    A real backend must be a @dataclass(frozen=True) with __slots__ = ()
+    instead, because a plain subclass gets a __dict__ back and loses the
+    barrier against per-session state on the engine. A double that only
+    overrides methods never stores anything, so it does not need it.
     """
 
     class Counting(cls):
@@ -77,8 +79,14 @@ def test_engines_built_once(monkeypatch):
     # Distinct per-service values: with config.py's shared "stub" default,
     # a mis-paired init_engines() (e.g. MT built with ASR_MODEL) would pass
     # the model_name assertions below undetected.
+    #
+    # MT is the exception and has to be a name its backend selector accepts:
+    # MTService validates model_name at construction, so an invented one now
+    # kills the lifespan before this test gets to assert anything. What the
+    # test needs is that the three values differ from each other, and "stub"
+    # against "asr-x"/"tts-z" still gives that.
     monkeypatch.setattr(settings, "ASR_MODEL", "asr-x")
-    monkeypatch.setattr(settings, "MT_MODEL", "mt-y")
+    monkeypatch.setattr(settings, "MT_MODEL", "stub")
     monkeypatch.setattr(settings, "TTS_MODEL", "tts-z")
     # Distinct per-service devices too: ASR_DEVICE/MT_DEVICE/TTS_DEVICE all
     # default to "cpu", so a mis-paired init_engines() (e.g. MT built with
