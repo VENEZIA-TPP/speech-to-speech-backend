@@ -1,0 +1,127 @@
+{
+  "measured_at": "2026-08-12T00:17:01+00:00",
+  "what": "OPUS-MT es<->en via CTranslate2, on CPU",
+  "evidence": "NOT evidence for this project. MT targets a cloud GPU, so these numbers describe hardware that will not serve a request: they are a correctness check, not a latency result. Do not quote them in the report. The one figure with a use beyond this file is load.per_process_ms, which the ASR replacement will pay per test.",
+  "machine": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "settings": {
+    "mt_model": "opus-mt",
+    "mt_device": "cpu",
+    "pairs": [
+      "en->es",
+      "es->en"
+    ],
+    "compute_type": "float32"
+  },
+  "load": {
+    "note": "Download excluded - paid once per machine. This is the cost of a process start, and the lifespan runs once per WebSocket test, not once per suite.",
+    "per_pair": [
+      {
+        "pair": "en->es",
+        "load_ms": 107.6
+      },
+      {
+        "pair": "es->en",
+        "load_ms": 93.4
+      }
+    ],
+    "per_process_ms": 201.0,
+    "lifespan_runs_per_suite": 25,
+    "projected_suite_overhead_ms": 5025.0
+  },
+  "translate": [
+    {
+      "pair": "en->es",
+      "median_ms": 81.0,
+      "phrases": [
+        {
+          "words_in": 5,
+          "median_ms": 51.1,
+          "max_ms": 52.2,
+          "output": "el sistema de traducción funciona correctamente"
+        },
+        {
+          "words_in": 10,
+          "median_ms": 95.6,
+          "max_ms": 97.4,
+          "output": "Buenos días, mi nombre es Víctor y yo estudio ingeniería."
+        },
+        {
+          "words_in": 10,
+          "median_ms": 88.2,
+          "max_ms": 89.5,
+          "output": "Necesito que me envíes el informe antes del viernes."
+        },
+        {
+          "words_in": 10,
+          "median_ms": 73.7,
+          "max_ms": 75.1,
+          "output": "No entiendo lo que me estás pidiendo."
+        }
+      ]
+    },
+    {
+      "pair": "es->en",
+      "median_ms": 91.3,
+      "phrases": [
+        {
+          "words_in": 6,
+          "median_ms": 43.6,
+          "max_ms": 44.0,
+          "output": "the translation system works properly"
+        },
+        {
+          "words_in": 8,
+          "median_ms": 95.3,
+          "max_ms": 108.5,
+          "output": "Good morning, my name is Victor and I study engineering"
+        },
+        {
+          "words_in": 9,
+          "median_ms": 87.4,
+          "max_ms": 87.7,
+          "output": "I need you to hand me the report by Friday."
+        },
+        {
+          "words_in": 9,
+          "median_ms": 109.6,
+          "max_ms": 111.4,
+          "output": "I don't understand what you're asking me now."
+        }
+      ]
+    }
+  ],
+  "missing_eos": {
+    "en->es": {
+      "with_eos": {
+        "median_ms": 88.8,
+        "words_out": 9,
+        "output_head": "Necesito que me envíes el informe antes del viernes."
+      },
+      "without_eos": {
+        "median_ms": 1962.4,
+        "words_out": 256,
+        "output_head": "Necesito que me envíe el informe antes del viernes viernes viernes viernes viernes viernes"
+      },
+      "cost_ratio": 22.1,
+      "input": "I need you to send me the report before Friday"
+    },
+    "es->en": {
+      "with_eos": {
+        "median_ms": 87.2,
+        "words_out": 10,
+        "output_head": "I need you to hand me the report by Friday."
+      },
+      "without_eos": {
+        "median_ms": 1938.5,
+        "words_out": 256,
+        "output_head": "I need you to pass me the report report before Friday Friday Friday Friday by Friday Frida"
+      },
+      "cost_ratio": 22.2,
+      "input": "necesito que me pases el informe antes del viernes"
+    }
+  }
+}

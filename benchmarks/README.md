@@ -5,7 +5,8 @@ script that produced them. A performance claim in this project cites a file in
 `results/` or it is not a claim.
 
 ```bash
-.venv/bin/python benchmarks/vad_endpoint.py    # writes results/vad_endpoint.json
+.venv/bin/python benchmarks/vad_endpoint.py              # results/vad_endpoint.json
+MT_MODEL=opus-mt .venv/bin/python benchmarks/mt_opus.py  # results/mt_opus_local.json
 ```
 
 ## What counts as evidence here, and what does not
@@ -38,3 +39,22 @@ substituted for.
   bounded worst case rather than an unbounded one.
 
 Warmup is measured separately and never mixed into the per-frame figures.
+
+## `mt_opus.py` — not evidence, and its filename says so
+
+Every timing in `results/mt_opus_local.json` is a correctness check. The
+`_local` suffix and the file's own `evidence` field both say it, because a JSON
+full of milliseconds is exactly the thing that gets quoted without its context.
+
+Two results in it are worth reading anyway:
+
+- **`load.per_process_ms`** — what opening the models costs at process start.
+  It matters beyond this file because the lifespan runs **once per WebSocket
+  test**, not once per suite: 25 times per pass, counted by instrumenting
+  `init_engines()` rather than by reading fixture signatures. Whatever the next
+  backend costs to open gets multiplied by that.
+- **`missing_eos`** — the cost of forgetting the `</s>` that terminates the
+  source token list. The decoder then never emits EOS and runs to its decoding
+  limit, so the failure arrives as 256 words of degenerating text rather than
+  as an exception. Measured at ~22× the wall clock of a correct call, which is
+  the shape it takes in a profile.
