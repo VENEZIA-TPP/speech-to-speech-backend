@@ -28,8 +28,8 @@ class ASRService:
 
     frozen + a hand-written __slots__ means `engine.buffer = ...` raises
     FrozenInstanceError for declared fields AND for new names alike, so
-    per-session state has nowhere to hide (ADR 0003, barrier #1). slots=True
-    would raise an unreadable TypeError for new names instead.
+    per-session state has nowhere to hide. slots=True would raise an
+    unreadable TypeError for new names instead.
 
     No field defaults: __slots__ and class-level defaults are mutually
     exclusive (ValueError at import time). Callers pass both values.
@@ -50,8 +50,8 @@ class ASRService:
         source_language: Optional[str] = None,
     ) -> ASRResult:
         # `state` is first on purpose: the signature is what tells whoever
-        # integrates a real streaming ASR where per-session memory belongs
-        # (ADR 0003, barrier #2). The engine is frozen; self is not an option.
+        # integrates a real streaming ASR where per-session memory belongs.
+        # The engine is frozen, so self is not an option.
         start = time.monotonic()
         text, detected_language, confidence = await to_thread.run_sync(
             self._transcribe, state, audio_bytes, source_language, limiter=_LIMITER

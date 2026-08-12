@@ -4,7 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.models.transcription import Transcription
-from app.repositories.interfaces.transcription_repository import ITranscriptionRepository
+from app.repositories.interfaces.transcription_repository import (
+    ITranscriptionRepository,
+)
 
 
 class SQLAlchemyTranscriptionRepository(ITranscriptionRepository):

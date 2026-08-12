@@ -1,8 +1,8 @@
 """Engine immutability and per-session state isolation.
 
-The four barriers against state leaking between sessions live in
-docs/adr/0003-workers-persistentes-y-estado-por-sesion.md; these are barriers
-#1 and #4.
+Two of the barriers that keep one session's state from reaching another: the
+engine cannot hold state at all, and two sessions running against the same
+engine must not see each other's.
 """
 
 from dataclasses import FrozenInstanceError, dataclass
@@ -53,9 +53,8 @@ def test_engine_subclass_is_frozen():
 async def test_two_sessions_do_not_share_state():
     """Two interleaved sessions must each count their own chunks: 3 and 3, not 6.
 
-    This is barrier #4 of ADR 0003, and it runs against the real stub engine -
-    not a double written for the test - because the stub genuinely writes its
-    per-chunk memory into `state`.
+    Runs against the real stub engine rather than a double written for the
+    test, because the stub genuinely writes its per-chunk memory into `state`.
     """
     from app.pipeline.contracts import ASRState
 
